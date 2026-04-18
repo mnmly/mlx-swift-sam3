@@ -2,6 +2,7 @@
 // Python source: sam3_1/tracker.py
 // Weight keys: tracker_model.*
 
+import Foundation
 import MLX
 import MLXNN
 
@@ -154,8 +155,8 @@ public class MultiplexTrackerModel: Module {
         }
 
         let imagePE: MLXArray
-        let peLen = interactiveSamPromptEncoder.getDensePE().dim(1)
         let basePE = interactiveSamPromptEncoder.getDensePE()
+        let peLen = basePE.dim(1)
         if peLen != h * w {
             let peSide = Int(Double(peLen).squareRoot())
             let peSpatial = basePE.reshaped([1, peSide, peSide, d])

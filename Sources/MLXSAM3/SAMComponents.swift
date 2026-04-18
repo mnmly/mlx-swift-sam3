@@ -248,7 +248,7 @@ class PositionalEmbedding: Module {
         let gridX = MLXArray(0..<w).asType(.float32) / Float(w)
         let gy = MLX.tiled(gridY.reshaped([h, 1]), repetitions: [1, w]).reshaped([-1])
         let gx = MLX.tiled(gridX.reshaped([1, w]), repetitions: [h, 1]).reshaped([-1])
-        let coords = stacked([gx, gy], axis: -1)[.newAxis, 0...]  // (1, H*W, 2)
+        let coords = stacked([gx, gy], axis: -1).expandedDimensions(axis: 0)  // (1, H*W, 2)
         return forwardWithCoords(coords)[0]  // (H*W, D)
     }
 
@@ -283,7 +283,7 @@ public class SAMPromptEncoder: Module {
 
     public func getDensePE() -> MLXArray {
         let (h, w) = imageEmbeddingSize
-        return sharedEmbedding((h, w))[.newAxis, 0...]  // (1, H*W, D)
+        return sharedEmbedding((h, w)).expandedDimensions(axis: 0)  // (1, H*W, D)
     }
 
     /// - Returns: (sparseEmbeddings: (B, N, D), denseEmbeddings: (B, HW, D))

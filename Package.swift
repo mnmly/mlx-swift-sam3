@@ -14,6 +14,8 @@ let package = Package(
         .executable(name: "ImageInfer", targets: ["ImageInfer"]),
         .executable(name: "Sam31ImageInfer", targets: ["Sam31ImageInfer"]),
         .executable(name: "VideoTrack", targets: ["VideoTrack"]),
+        .executable(name: "Sam31VideoTrack", targets: ["Sam31VideoTrack"]),
+        .executable(name: "Sam31VideoTrackFull", targets: ["Sam31VideoTrackFull"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.3")),
@@ -55,6 +57,22 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             path: "Examples/VideoTrack"
+        ),
+        .executableTarget(
+            name: "Sam31VideoTrack",
+            dependencies: [
+                "MLXSAM3",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Examples/Sam31VideoTrack"
+        ),
+        .executableTarget(
+            name: "Sam31VideoTrackFull",
+            dependencies: [
+                "MLXSAM3",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Examples/Sam31VideoTrackFull"
         ),
         .testTarget(
             name: "MLXSAM3Tests",

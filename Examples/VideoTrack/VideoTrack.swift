@@ -14,8 +14,10 @@ import AVFoundation
 import CoreGraphics
 import CoreMedia
 import Foundation
+import ImageIO
 import MLX
 import MLXSAM3
+import UniformTypeIdentifiers
 
 struct VTArgs {
     var input: URL
@@ -137,9 +139,6 @@ struct VideoTrackMain {
         print("loading SAM3 weights from \(args.weights.path)…")
         let model = Sam3Model(ModelConfig())
         try ModelLoader.load(sam3: model, from: args.weights, dtype: args.dtype)
-        let predictor = SAM3ImagePredictor(
-            model: model, resolution: args.resolution, confidenceThreshold: args.threshold)
-
         let reader = try await AVFoundationVideoReader(url: args.input)
         let outW = Int(reader.naturalSize.width)
         let outH = Int(reader.naturalSize.height)
@@ -148,17 +147,41 @@ struct VideoTrackMain {
 
         var frameIndex: Int64 = 0
         while let frame = try reader.nextFrame() {
-            let prediction = try predictor.predict(
-                image: frame.image,
-                inputIds: inputIds,
-                attentionMask: attentionMask,
-                dtype: args.dtype)
+            let pixel = try ImagePreprocess.pixelValues(
+                from: frame.image, size: args.resolution, dtype: args.dtype)
+            let outputs = model.detect(
+                pixelValues: pixel, inputIds: inputIds, attentionMask: attentionMask)
+            MLX.eval(Array(outputs.values))
+            if frameIndex < 3,
+               let logits = outputs["pred_logits"], let pres = outputs["presence_logits"] {
+                let cls = MLX.sigmoid(logits)[0]
+                let pr = MLX.sigmoid(pres)[0].squeezed()
+                let sc = (cls * pr).asType(.float32).asArray(Float.self)
+                let top = sc.sorted(by: >).prefix(5)
+                print("  frame \(frameIndex) scores: max=\(sc.max() ?? 0) top5=\(Array(top))")
+                if frameIndex == 0 {
+                    let dbg = args.output.deletingLastPathComponent()
+                        .appendingPathComponent("videotrack_frame0.png")
+                    if let dst = CGImageDestinationCreateWithURL(
+                        dbg as CFURL, UTType.png.identifier as CFString, 1, nil) {
+                        CGImageDestinationAddImage(dst, frame.image, nil)
+                        _ = CGImageDestinationFinalize(dst)
+                        print("  (wrote \(dbg.path) for sanity check)")
+                    }
+                }
+            }
+            let prediction = SAM3ImagePredictor.postprocess(
+                outputs: outputs,
+                originalHeight: frame.image.height,
+                originalWidth: frame.image.width,
+                threshold: args.threshold)
             let overlay = renderOverlay(image: frame.image, prediction: prediction)
             try writer.append(
                 image: overlay,
                 at: CMTime(value: frameIndex, timescale: args.frameRate))
             frameIndex += 1
             if frameIndex % 10 == 0 { print("  frame \(frameIndex) (\(prediction.boxes.dim(0)) dets)") }
+            MLX.Memory.clearCache()
         }
         try await writer.finish()
         print("wrote \(args.output.path) — \(frameIndex) frames")

@@ -144,6 +144,32 @@ public class Sam31Model: Module {
         return prop
     }
 
+    /// Vision-only forward producing just the tracker propagation pyramid.
+    /// Use on non-redetect frames to skip DETR/text cost.
+    public func propagationFeatures(pixelValues: MLXArray) -> [MLXArray] {
+        let backbone = detectorModel.visionEncoder.backbone(pixelValues)
+        return getTrackerFeatures(backbone)
+    }
+
+    /// Propagate a single object using pre-computed tracker features.
+    /// Slim v2: memory bank left nil; identity is maintained via box prompt only.
+    public func propagateStep(
+        propagationFeatures prop: [MLXArray],
+        promptBoxNormalized box: MLXArray
+    ) -> [String: MLXArray] {
+        let features = prop[2]
+        let highRes = prop.count > 2 ? [prop[0], prop[1]] : nil
+        return trackerModel.trackStep(
+            currentFeatures: features,
+            memoryBank: nil,
+            promptPoints: nil,
+            promptBoxes: box,
+            promptMasks: nil,
+            multimaskOutput: false,
+            highResFeatures: highRes
+        )
+    }
+
     public func trackStep(
         backboneFeatures: MLXArray,
         memoryBank: [MLXArray]? = nil,

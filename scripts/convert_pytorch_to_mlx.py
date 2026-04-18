@@ -63,22 +63,43 @@ COPY_FILES = [
 ]
 
 
-def iter_safetensors(src: Path):
-    """Yield (key, tensor) across single-file or sharded checkpoints."""
+def iter_weights(src: Path):
+    """Yield (key, tensor) from safetensors (single/sharded) or a .pt pickle."""
     idx = src / "model.safetensors.index.json"
     if idx.exists():
         mapping = json.loads(idx.read_text())["weight_map"]
         shards = sorted({src / s for s in mapping.values()})
-    else:
-        single = src / "model.safetensors"
-        if not single.exists():
-            raise FileNotFoundError(f"no safetensors in {src}")
-        shards = [single]
+        for shard in shards:
+            with safe_open(shard, framework="pt") as f:
+                for k in f.keys():
+                    yield k, f.get_tensor(k)
+        return
 
-    for shard in shards:
-        with safe_open(shard, framework="pt") as f:
+    single = src / "model.safetensors"
+    if single.exists():
+        with safe_open(single, framework="pt") as f:
             for k in f.keys():
                 yield k, f.get_tensor(k)
+        return
+
+    pts = sorted(src.glob("*.pt")) + sorted(src.glob("*.pth"))
+    if not pts:
+        raise FileNotFoundError(f"no safetensors or .pt in {src}")
+    for pt in pts:
+        obj = torch.load(pt, map_location="cpu", weights_only=True)
+        state = _extract_state_dict(obj)
+        for k, v in state.items():
+            if isinstance(v, torch.Tensor):
+                yield k, v
+
+
+def _extract_state_dict(obj):
+    if isinstance(obj, dict):
+        for key in ("state_dict", "model", "model_state_dict", "weights"):
+            if key in obj and isinstance(obj[key], dict):
+                return obj[key]
+        return obj
+    raise TypeError(f"unsupported .pt payload: {type(obj)}")
 
 
 CONVTRANSPOSE_PATTERNS = {
@@ -124,7 +145,7 @@ def main():
     print(f"converting {args.src} → {args.dst} (dtype={args.dtype})")
     converted: dict[str, torch.Tensor] = {}
     transposed = 0
-    for key, tensor in iter_safetensors(args.src):
+    for key, tensor in iter_weights(args.src):
         new = convert(tensor, key, dtype)
         if new.shape != tensor.shape:
             transposed += 1

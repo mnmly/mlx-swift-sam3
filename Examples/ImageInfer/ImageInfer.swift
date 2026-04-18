@@ -1,11 +1,18 @@
 // ImageInfer — CLI: SAM3 image + text prompt → mask/box overlay PNG.
 //
-// Build:   swift build --product ImageInfer
-// Run:     swift run ImageInfer \
-//              --image  path/to/input.jpg \
-//              --tokens path/to/tokens.safetensors \
-//              --weights weights/sam3 \
-//              --output path/to/overlay.png
+
+// build: xcodebuild -scheme ImageInfer -destination 'platform=macOS' build -derivedDataPath .build/xcode
+// convert the pytorch checkpoint to mlx safetensors via python
+// uv run scripts/convert_pytorch_to_mlx.py--checkpoint /path/to/pytorch/sam3_checkpoint.pth --output /path/to/mlx/sam3_checkpoint.safetensors
+// SNAP: weights/mlx-sam3
+// run .build/xcode/Build/Products/Debug/ImageInfer \
+// --image ~/Downloads/default.jpeg \
+// --prompt "animals" \
+// --tokenizer "$SNAP" \
+// --weights "$SNAP" \
+// --output out.png \
+// --threshold 0.5 \
+// --dtype float3
 //
 // `tokens.safetensors` must contain an `input_ids` key of shape (1, T) Int32.
 // Tokenizer is deferred — generate this offline (e.g. via the Python CLIP BPE).

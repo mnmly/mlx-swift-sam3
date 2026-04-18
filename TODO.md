@@ -92,7 +92,39 @@ Direct port of [`facebookresearch/sam3`](https://github.com/facebookresearch/sam
 ### Phase 11 — demos
 - [x] `Examples/ImageInfer.swift` — `ImageInfer.run(image:inputIds:weightsDir:)` wraps `SAM3ImagePredictor`; `renderOverlay` draws boxes + mask fills onto a `CGImage`. Tokenizer still deferred — caller passes pre-tokenized `inputIds`.
 - [x] `Examples/VideoTrack.swift` — `VideoTrack.run(inputURL:outputURL:inputIds:weightsDir:)` iterates reader → per-frame `predict()` → overlay → writer. Slim: independent per-frame detection, no memory-bank tracking (that path is the deferred Phase 9 video orchestration).
+- [x] `Examples/Sam31VideoTrack.swift` — slim SAM 3.1 per-frame detect only (mirrors `VideoTrack`); tokenizer pinned to `maxLength=32` (SAM 3.1 text_config.max_position_embeddings=32).
 - [x] **Tokenizer** — resolved with `swift-transformers` 1.3.0; demos now accept raw `--prompt`.
+
+### Phase 11.5 (new) — full video tracker demo (`Sam31VideoTrack` v2)
+
+Goal: replace per-frame detect with `Sam31Model.trackStep`-driven propagation so object identities persist across frames (current slim demo flickers, re-detects every frame independently).
+
+Scope / subtasks:
+- [x] **Object-state struct.** `TrackedObject { id, lastBoxNormalized, lastBoxPixels, lastMask, lastScore, framesSinceSeen }` in `Sources/MLXSAM3/Sam31VideoTracker.swift`. Memory bank deferred (v2 slim gap).
+- [x] **First-frame seeding.** `redetectFrame` path in `Sam31VideoTracker`: `model.detect()` → `SAM3ImagePredictor.postprocess` → greedy IoU-associate; unmatched become new tracks.
+- [x] **Per-frame propagate.** `propagateFrame` path: `model.propagationFeatures(pixelValues:)` once, then per-track `model.propagateStep(propagationFeatures:, promptBoxNormalized:)` with last normalized box as prompt. Picks argmax-iou mask slot, upsamples, re-derives tight xyxy box.
+- [x] **Re-detect & associate.** Greedy IoU against `lastBoxPixels`, threshold `assocIoUThreshold` (default 0.3), score-descending order.
+- [~] **Keep-alive / termination.** Slim: `maxMissingFrames` drop rule only. Full `sam3_multiplex_tracking.py` keep-alive config (`init/min/max_trk_keep_alive`, `hotstart_*`) deferred — add only if tracks churn badly in practice.
+- [ ] **Memory bank serialization of past masks.** Deferred (v2 gap). Requires wiring `MultiplexMemoryEncoder` + temporal PE + `interactivityNoMemEmbed` into `trackStep`; mask-downsampler expects 32-channel multiplex stack that needs python-side inspection before porting.
+- [~] **Occlusion / low-conf gating.** Stub via `framesSinceSeen` bookkeeping; `obj_scores` threshold not yet applied.
+- [x] **CLI surface.** `Sam31VideoTrackFull` target with `--redetect-every N`, `--threshold`, `--resolution`, `--fps`, `--dtype`.
+- [x] **Overlay.** Per-ID HSV palette (stable hash of id); fill + stroke + box per track.
+- [ ] **Parity / smoke tests.**
+  - [ ] Shape-level: seed 2 synthetic objects on frame 0, run 5 frames, assert IDs stable, memory bank length monotonic-up-to-cap.
+  - [ ] Numerical parity vs `python/sam3` multiplex video predictor on a 10-frame clip: per-frame mask IoU ≥ 0.9 (atol via mask-threshold binarization). Fixture generator: new `scripts/export_fixtures.py::sam3_1_video_track` dumping inputs (video frames tensor, prompt ids) + expected masks + obj_scores.
+- [ ] **Docs.** Add a short section to README explaining slim vs full modes and when to pick each.
+
+Open questions (decide before starting):
+- Port `sam3_multiplex_tracking.py` config + association logic verbatim vs. simpler greedy-IoU first pass?  Recommendation: start with slim greedy-IoU, add full logic only when parity test fails.
+- Where does `Sam31Tracker` currently expose `object_score` / `obj_ptr` from `trackStep`? Audit `Sources/MLXSAM3/Sam31Tracker.swift` return dict before coding the orchestrator.
+- EDT (Phase 9 deferred) needed? `python/sam3` uses it for FN/FP correction inside tracker; likely skip in v2 slim, revisit if mask parity drops.
+
+Estimated effort: 4–8 hours for slim greedy-IoU version; +4–8 hours if full `sam3_multiplex_tracking` association logic + parity fixture is required.
+
+**Next-session plan (decided 2026-04-18)** — user chose "full", broken into sub-phases:
+- **11.5a**: memory-bank serialization wired end-to-end (MultiplexMemoryEncoder + temporal PE + interactivityNoMemEmbed + obj_ptr stream into `trackStep`); slim mask-IoU association; `obj_scores` gating. No parity yet. Start by reading `python/sam3/sam3/model/sam3_multiplex_tracking.py` (3431L) + `sam3_tracker_base.py` (1185L) + `memory.py` (209L) to pin down the exact stacking order / channel layout for the 32-ch multiplex mask stack.
+- **11.5b**: parity fixture — new `scripts/export_fixtures.py::sam3_1_video_track` generator (10-frame clip, prompt ids → expected masks + obj_scores) + XCTest asserting per-frame mask IoU ≥ 0.9.
+- **11.5c** (only if 11.5b fails): port full `sam3_multiplex_tracking.py` association logic (keep-alive, hotstart, multiplex-slot routing).
 
 ### Phase 12 (optional) — agent helpers
 - [ ] Port `agent/helpers/` inference math (`zoom_in`, `roi_align`, `mask_overlap_removal`, `rle`, `color_map`, `keypoints`).

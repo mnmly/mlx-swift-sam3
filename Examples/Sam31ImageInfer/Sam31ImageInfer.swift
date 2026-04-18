@@ -140,7 +140,7 @@ struct Sam31ImageInferMain {
             inputIds = ids
             attentionMask = d["attention_mask"]
         } else {
-            let tok = try await SAM3Tokenizer.fromSnapshot(args.tokenizer!)
+            let tok = try await SAM3Tokenizer.fromSnapshot(args.tokenizer!, maxLength: 32)
             let out = tok.encode(args.prompt!)
             inputIds = out.inputIds
             attentionMask = out.attentionMask
@@ -160,6 +160,13 @@ struct Sam31ImageInferMain {
             inputIds: inputIds,
             attentionMask: attentionMask)
         MLX.eval(Array(outputs.values))
+        if let logits = outputs["pred_logits"], let pres = outputs["presence_logits"] {
+            let cls = MLX.sigmoid(logits)[0]
+            let pr = MLX.sigmoid(pres)[0].squeezed()
+            let sc = (cls * pr).asType(.float32).asArray(Float.self)
+            let top = sc.sorted(by: >).prefix(5)
+            print("  score distribution: max=\(sc.max() ?? 0) top5=\(Array(top))")
+        }
 
         let prediction = SAM3ImagePredictor.postprocess(
             outputs: outputs,
