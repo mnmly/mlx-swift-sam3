@@ -81,12 +81,25 @@ def iter_safetensors(src: Path):
                 yield k, f.get_tensor(k)
 
 
+CONVTRANSPOSE_PATTERNS = {
+    "scale_layers",
+    "upscale_conv",
+    "resize_layers",
+}
+
+
+def is_convtranspose(key: str) -> bool:
+    return any(pat in key for pat in CONVTRANSPOSE_PATTERNS)
+
+
 def convert(t: torch.Tensor, key: str, dtype: torch.dtype | None) -> torch.Tensor:
-    # Transpose 4D conv weights OIHW → OHWI. Works for Conv2d AND
-    # ConvTranspose2d (PyTorch IOHW also permutes (0,2,3,1) → IHWO, which is
-    # what MLX ConvTransposed2d expects).
     if t.ndim == 4 and key.endswith(".weight"):
-        t = t.permute(0, 2, 3, 1).contiguous()
+        if is_convtranspose(key):
+            # ConvTransposed2d: PyTorch (in, out, kH, kW) → MLX (out, kH, kW, in)
+            t = t.permute(1, 2, 3, 0).contiguous()
+        else:
+            # Conv2d: PyTorch (out, in, kH, kW) → MLX (out, kH, kW, in)
+            t = t.permute(0, 2, 3, 1).contiguous()
     if dtype is not None:
         t = t.to(dtype)
     return t
@@ -97,8 +110,12 @@ def main():
     ap.add_argument("--src", type=Path, required=True, help="raw HF snapshot dir")
     ap.add_argument("--dst", type=Path, required=True, help="output dir (MLX layout)")
     ap.add_argument("--dtype", choices=list(DTYPE_MAP), default="bf16")
-    ap.add_argument("--shard-size-mb", type=int, default=5000,
-                    help="max shard size in MB (0 = single file)")
+    ap.add_argument(
+        "--shard-size-mb",
+        type=int,
+        default=5000,
+        help="max shard size in MB (0 = single file)",
+    )
     args = ap.parse_args()
 
     dtype = DTYPE_MAP[args.dtype]
@@ -118,7 +135,7 @@ def main():
     limit = args.shard_size_mb * 1024 * 1024
     if limit == 0 or _total_bytes(converted) <= limit:
         save_file(converted, str(args.dst / "model.safetensors"))
-        print(f"  wrote model.safetensors ({_total_bytes(converted)/1e6:.1f} MB)")
+        print(f"  wrote model.safetensors ({_total_bytes(converted) / 1e6:.1f} MB)")
     else:
         _write_sharded(converted, args.dst, limit)
 
@@ -154,12 +171,14 @@ def _write_sharded(d: dict[str, torch.Tensor], dst: Path, limit: int):
         save_file(shard, str(dst / name))
         for k in shard:
             weight_map[k] = name
-        print(f"  wrote {name} ({sizes[i-1]/1e6:.1f} MB)")
+        print(f"  wrote {name} ({sizes[i - 1] / 1e6:.1f} MB)")
 
     total = sum(sizes)
     (dst / "model.safetensors.index.json").write_text(
-        json.dumps({"metadata": {"total_size": total}, "weight_map": weight_map},
-                   indent=2))
+        json.dumps(
+            {"metadata": {"total_size": total}, "weight_map": weight_map}, indent=2
+        )
+    )
     print(f"  wrote model.safetensors.index.json ({n} shards)")
 
 
