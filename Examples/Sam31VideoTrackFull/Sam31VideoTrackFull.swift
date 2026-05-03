@@ -33,6 +33,7 @@ struct S31VTFArgs {
     var redetectEvery: Int = 15
     var frameRate: Int32 = 30
     var dtype: DType = .bfloat16
+    var maxFrames: Int?
 }
 
 func parse31VTF() -> S31VTFArgs {
@@ -48,7 +49,7 @@ func parse31VTF() -> S31VTFArgs {
         FileHandle.standardError.write(Data("""
         usage: Sam31VideoTrackFull --input <mp4> --weights <dir> --output <mp4> \
         (--prompt "a cat" --tokenizer <snapshot-dir> | --tokens <safetensors>) \
-        [--resolution 1008] [--threshold 0.5] [--redetect-every 15] [--fps 30]
+        [--resolution 1008] [--threshold 0.5] [--redetect-every 15] [--fps 30] [--max-frames N]
         """.utf8))
         exit(2)
     }
@@ -68,6 +69,7 @@ func parse31VTF() -> S31VTFArgs {
     if let s = dict["threshold"], let v = Float(s) { a.threshold = v }
     if let s = dict["redetect-every"], let v = Int(s) { a.redetectEvery = v }
     if let s = dict["fps"], let v = Int32(s) { a.frameRate = v }
+    if let s = dict["max-frames"], let v = Int(s) { a.maxFrames = v }
     if let s = dict["dtype"] {
         switch s {
         case "float16", "fp16", "f16": a.dtype = .float16
@@ -153,7 +155,7 @@ struct Sam31VideoTrackFullMain {
             inputIds = ids
             attentionMask = d["attention_mask"]
         } else {
-            let tok = try await SAM3Tokenizer.fromSnapshot(args.tokenizer!, maxLength: 32)
+            let tok = try await SAM3Tokenizer.fromSnapshotOrOpenAIClip(args.tokenizer!, maxLength: 32)
             let out = tok.encode(args.prompt!)
             inputIds = out.inputIds
             attentionMask = out.attentionMask
@@ -179,6 +181,7 @@ struct Sam31VideoTrackFullMain {
 
         var frameIndex: Int64 = 0
         while let frame = try reader.nextFrame() {
+            if let maxFrames = args.maxFrames, frameIndex >= maxFrames { break }
             let pixel = try ImagePreprocess.pixelValues(
                 from: frame.image, size: args.resolution, dtype: args.dtype)
             let live = tracker.step(

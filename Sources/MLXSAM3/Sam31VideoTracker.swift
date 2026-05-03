@@ -95,7 +95,12 @@ public final class Sam31VideoTracker {
     ) {
         let outputs = model.detect(
             pixelValues: pixelValues, inputIds: inputIds, attentionMask: attentionMask)
-        MLX.eval(Array(outputs.values))
+        MLX.eval([
+            outputs["pred_logits"]!,
+            outputs["pred_boxes"]!,
+            outputs["pred_masks"]!,
+            outputs["presence_logits"]!,
+        ])
         let pred = SAM3ImagePredictor.postprocess(
             outputs: outputs, originalHeight: origH, originalWidth: origW,
             threshold: detectThreshold)
@@ -161,7 +166,7 @@ public final class Sam31VideoTracker {
             let outputs = model.propagateStep(
                 propagationFeatures: prop,
                 promptBoxNormalized: tracks[i].lastBoxNormalized)
-            MLX.eval(Array(outputs.values))
+            MLX.eval(outputs.values.map { $0 })
 
             guard let predMasks = outputs["pred_masks"],
                   let iouScores = outputs["iou_scores"] else {

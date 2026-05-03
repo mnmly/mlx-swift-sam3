@@ -16,3 +16,4 @@ Tests/MLXSAM3Tests/Fixtures/*.safetensors
 weights/
 .venv/
 __pycache__/
+.vscode

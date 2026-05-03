@@ -30,6 +30,7 @@ let package = Package(
                 .product(name: "MLXFast", package: "mlx-swift"),
                 .product(name: "MLXLinalg", package: "mlx-swift"),
                 .product(name: "MLXRandom", package: "mlx-swift"),
+                .product(name: "Hub", package: "swift-transformers"),
                 .product(name: "Tokenizers", package: "swift-transformers"),
             ],
             path: "Sources/MLXSAM3"

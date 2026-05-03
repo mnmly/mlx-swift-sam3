@@ -129,7 +129,7 @@ struct VideoTrackMain {
             inputIds = ids
             attentionMask = d["attention_mask"]
         } else {
-            let tok = try await SAM3Tokenizer.fromSnapshot(args.tokenizer!)
+            let tok = try await SAM3Tokenizer.fromSnapshotOrOpenAIClip(args.tokenizer!)
             let out = tok.encode(args.prompt!)
             inputIds = out.inputIds
             attentionMask = out.attentionMask

@@ -2,6 +2,7 @@
 // Python source: sam3_1/sam3_1.py
 // Weight keys: detector_model.* / tracker_model.*
 
+import Foundation
 import MLX
 import MLXNN
 
@@ -107,6 +108,9 @@ public class Sam31DetectorModel: Module {
             "pred_masks": predMasks,
             "presence_logits": presence,
             "semantic_seg": semanticSeg,
+            "intermediate_hidden_states": hs,
+            "intermediate_boxes": refBoxes,
+            "encoder_hidden_states": encoded,
         ]
     }
 }
@@ -130,6 +134,103 @@ public class Sam31Model: Module {
         inputsEmbeds: MLXArray? = nil
     ) -> [String: MLXArray] {
         detectorModel(pixelValues: pixelValues, inputIds: inputIds, attentionMask: attentionMask, inputsEmbeds: inputsEmbeds)
+    }
+
+    public func detectProfiled(
+        pixelValues: MLXArray,
+        inputIds: MLXArray? = nil,
+        attentionMask: MLXArray? = nil,
+        inputsEmbeds: MLXArray? = nil
+    ) -> ([String: MLXArray], [(String, Double)]) {
+        var timings: [(String, Double)] = []
+
+        func measure<T>(_ name: String, _ body: () -> T, eval: (T) -> Void) -> T {
+            let start = Date().timeIntervalSinceReferenceDate
+            let value = body()
+            eval(value)
+            timings.append((name, (Date().timeIntervalSinceReferenceDate - start) * 1000))
+            return value
+        }
+
+        let det = detectorModel
+
+        let backboneFeatures = measure("vision.backbone", {
+            det.visionEncoder.backbone(pixelValues)
+        }, eval: { MLX.eval($0) })
+
+        let detFeatures = measure("vision.neck.det", {
+            det.visionEncoder.neck(
+                backboneFeatures,
+                needDet: true,
+                needInteractive: false,
+                needPropagation: false
+            ).0
+        }, eval: { MLX.eval($0) })
+
+        let (src, posFlat, h, w) = measure("posenc_flatten", {
+            let fpnPos = detFeatures.map { det.posEnc($0) }
+            let encFeat = detFeatures.last!
+            let encPos = fpnPos.last!
+            let b = encFeat.dim(0), h = encFeat.dim(1), w = encFeat.dim(2), d = encFeat.dim(3)
+            return (
+                encFeat.reshaped([b, h * w, d]),
+                encPos.reshaped([b, h * w, d]),
+                h,
+                w
+            )
+        }, eval: { MLX.eval($0.0, $0.1) })
+
+        let embeds = measure("text_encoder", {
+            inputsEmbeds ?? det.getInputEmbeddings(inputIds!, attentionMask: attentionMask)
+        }, eval: { MLX.eval($0) })
+
+        let encoded = measure("detr_encoder", {
+            det.detrEncoder(src, pos: posFlat, textMemory: embeds, textMask: attentionMask)
+        }, eval: { MLX.eval($0) })
+
+        let (hs, refBoxes, presenceLogits) = measure("detr_decoder", {
+            det.detrDecoder(
+                visionFeatures: encoded,
+                inputsEmbeds: embeds,
+                visionPosEncoding: posFlat,
+                textMask: attentionMask,
+                spatialShape: (h, w)
+            )
+        }, eval: { MLX.eval($0.0, $0.1, $0.2) })
+
+        let (predLogits, predBoxesXYXY, presence) = measure("scoring_boxes", {
+            let predBoxesCxcywh = refBoxes[refBoxes.dim(0) - 1]
+            let cx = predBoxesCxcywh[.ellipsis, 0], cy = predBoxesCxcywh[.ellipsis, 1]
+            let bw = predBoxesCxcywh[.ellipsis, 2], bh = predBoxesCxcywh[.ellipsis, 3]
+            let predBoxesXYXY = stacked([cx - bw / 2, cy - bh / 2, cx + bw / 2, cy + bh / 2], axis: -1)
+            let allPredLogits = det.dotProductScoring(hs, inputsEmbeds: embeds, textMask: attentionMask)
+            return (
+                allPredLogits[allPredLogits.dim(0) - 1],
+                predBoxesXYXY,
+                presenceLogits[presenceLogits.dim(0) - 1]
+            )
+        }, eval: { MLX.eval($0.0, $0.1, $0.2) })
+
+        let (predMasks, semanticSeg) = measure("mask_decoder", {
+            det.maskDecoder(
+                objQueries: hs[hs.dim(0) - 1],
+                backboneFeatures: detFeatures,
+                encoderHiddenStates: encoded,
+                promptFeatures: embeds,
+                promptMask: attentionMask
+            )
+        }, eval: { MLX.eval($0.0, $0.1) })
+
+        return ([
+            "pred_logits": predLogits.squeezed(axes: [-1]),
+            "pred_boxes": predBoxesXYXY,
+            "pred_masks": predMasks,
+            "presence_logits": presence,
+            "semantic_seg": semanticSeg,
+            "intermediate_hidden_states": hs,
+            "intermediate_boxes": refBoxes,
+            "encoder_hidden_states": encoded,
+        ], timings)
     }
 
     public func getInputEmbeddings(_ inputIds: MLXArray, attentionMask: MLXArray? = nil) -> (MLXArray, MLXArray?) {

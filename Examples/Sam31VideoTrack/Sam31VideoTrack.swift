@@ -30,6 +30,8 @@ struct S31VTArgs {
     var threshold: Float = 0.5
     var frameRate: Int32 = 30
     var dtype: DType = .bfloat16
+    var maxFrames: Int?
+    var benchmark = false
 }
 
 func parse31VT() -> S31VTArgs {
@@ -45,7 +47,7 @@ func parse31VT() -> S31VTArgs {
         FileHandle.standardError.write(Data("""
         usage: Sam31VideoTrack --input <mp4> --weights <dir> --output <mp4> \
         (--prompt "a cat" --tokenizer <snapshot-dir> | --tokens <safetensors>) \
-        [--resolution 1008] [--threshold 0.5] [--fps 30]
+        [--resolution 1008] [--threshold 0.5] [--fps 30] [--max-frames N] [--benchmark true]
         """.utf8))
         exit(2)
     }
@@ -64,6 +66,8 @@ func parse31VT() -> S31VTArgs {
     if let s = dict["resolution"], let v = Int(s) { a.resolution = v }
     if let s = dict["threshold"], let v = Float(s) { a.threshold = v }
     if let s = dict["fps"], let v = Int32(s) { a.frameRate = v }
+    if let s = dict["max-frames"], let v = Int(s) { a.maxFrames = v }
+    if dict["benchmark"] != nil { a.benchmark = true }
     if let s = dict["dtype"] {
         switch s {
         case "float16", "fp16", "f16": a.dtype = .float16
@@ -73,6 +77,23 @@ func parse31VT() -> S31VTArgs {
         }
     }
     return a
+}
+
+func now31VT() -> TimeInterval {
+    Date().timeIntervalSinceReferenceDate
+}
+
+func printBench31VT(_ name: String, _ value: TimeInterval) {
+    print("  [bench] \(name)=\(String(format: "%.3f", value * 1000)) ms")
+}
+
+func evalDetectionOutputs31VT(_ outputs: [String: MLXArray]) {
+    MLX.eval([
+        outputs["pred_logits"]!,
+        outputs["pred_boxes"]!,
+        outputs["pred_masks"]!,
+        outputs["presence_logits"]!,
+    ])
 }
 
 func renderOverlay31VT(image: CGImage, prediction: SAM3ImagePrediction) -> CGImage {
@@ -115,6 +136,7 @@ func renderOverlay31VT(image: CGImage, prediction: SAM3ImagePrediction) -> CGIma
 struct Sam31VideoTrackMain {
     static func main() async throws {
         let args = parse31VT()
+        let tTotal0 = now31VT()
 
         let inputIds: MLXArray
         let attentionMask: MLXArray?
@@ -127,31 +149,64 @@ struct Sam31VideoTrackMain {
             inputIds = ids
             attentionMask = d["attention_mask"]
         } else {
-            let tok = try await SAM3Tokenizer.fromSnapshot(args.tokenizer!, maxLength: 32)
+            let t0 = now31VT()
+            let tok = try await SAM3Tokenizer.fromSnapshotOrOpenAIClip(args.tokenizer!, maxLength: 32)
             let out = tok.encode(args.prompt!)
             inputIds = out.inputIds
             attentionMask = out.attentionMask
             print("tokenized '\(args.prompt!)' → \(inputIds.dim(-1)) ids")
+            if args.benchmark { printBench31VT("tokenize", now31VT() - t0) }
         }
 
         print("loading SAM 3.1 weights from \(args.weights.path)…")
+        let tLoad0 = now31VT()
         let model = Sam31Model(Sam31ModelConfig())
         try ModelLoader.load(sam31: model, from: args.weights, dtype: args.dtype)
+        if args.benchmark { printBench31VT("model.load", now31VT() - tLoad0) }
 
+        let tText0 = now31VT()
+        let (inputsEmbeds, promptMask) = model.getInputEmbeddings(inputIds, attentionMask: attentionMask)
+        if args.benchmark { printBench31VT("text_encoder", now31VT() - tText0) }
+
+        let tIO0 = now31VT()
         let reader = try await AVFoundationVideoReader(url: args.input)
         let outW = Int(reader.naturalSize.width)
         let outH = Int(reader.naturalSize.height)
         let writer = try AVFoundationVideoWriter(
             url: args.output, width: outW, height: outH, frameRate: args.frameRate)
+        if args.benchmark { printBench31VT("video.open", now31VT() - tIO0) }
 
         var frameIndex: Int64 = 0
+        var preTotal: TimeInterval = 0
+        var forwardTotal: TimeInterval = 0
+        var postTotal: TimeInterval = 0
+        var overlayWriteTotal: TimeInterval = 0
         while let frame = try reader.nextFrame() {
+            if let maxFrames = args.maxFrames, frameIndex >= maxFrames { break }
+            let tPre0 = now31VT()
             let pixel = try ImagePreprocess.pixelValues(
                 from: frame.image, size: args.resolution, dtype: args.dtype)
-            let outputs = model.detect(
-                pixelValues: pixel, inputIds: inputIds, attentionMask: attentionMask)
-            MLX.eval(Array(outputs.values))
-            if frameIndex < 3,
+            MLX.eval(pixel)
+            preTotal += now31VT() - tPre0
+            let tForward0 = now31VT()
+            let outputs: [String: MLXArray]
+            if args.benchmark, frameIndex == 0 {
+                let (profiledOutputs, timings) = model.detectProfiled(
+                    pixelValues: pixel,
+                    attentionMask: promptMask,
+                    inputsEmbeds: inputsEmbeds)
+                outputs = profiledOutputs
+                for (name, ms) in timings {
+                    print("  [forward frame0] \(name)=\(String(format: "%.3f", ms)) ms")
+                }
+            } else {
+                outputs = model.detect(
+                    pixelValues: pixel, attentionMask: promptMask, inputsEmbeds: inputsEmbeds)
+            }
+            evalDetectionOutputs31VT(outputs)
+            forwardTotal += now31VT() - tForward0
+            if !args.benchmark,
+               frameIndex < 3,
                let logits = outputs["pred_logits"], let pres = outputs["presence_logits"] {
                 let cls = MLX.sigmoid(logits)[0]
                 let pr = MLX.sigmoid(pres)[0].squeezed()
@@ -159,20 +214,34 @@ struct Sam31VideoTrackMain {
                 let top = sc.sorted(by: >).prefix(5)
                 print("  frame \(frameIndex) scores: max=\(sc.max() ?? 0) top5=\(Array(top))")
             }
+            let tPost0 = now31VT()
             let prediction = SAM3ImagePredictor.postprocess(
                 outputs: outputs,
                 originalHeight: frame.image.height,
                 originalWidth: frame.image.width,
                 threshold: args.threshold)
+            postTotal += now31VT() - tPost0
+            let tOverlay0 = now31VT()
             let overlay = renderOverlay31VT(image: frame.image, prediction: prediction)
             try writer.append(
                 image: overlay,
                 at: CMTime(value: frameIndex, timescale: args.frameRate))
+            overlayWriteTotal += now31VT() - tOverlay0
             frameIndex += 1
             if frameIndex % 10 == 0 { print("  frame \(frameIndex) (\(prediction.boxes.dim(0)) dets)") }
             MLX.Memory.clearCache()
         }
         try await writer.finish()
+        if args.benchmark, frameIndex > 0 {
+            let n = Double(frameIndex)
+            printBench31VT("preprocess.avg", preTotal / n)
+            printBench31VT("forward.avg", forwardTotal / n)
+            printBench31VT("postprocess.avg", postTotal / n)
+            printBench31VT("overlay.write.avg", overlayWriteTotal / n)
+            let total = now31VT() - tTotal0
+            printBench31VT("total", total)
+            print("  [bench] end_to_end_fps=\(String(format: "%.2f", Double(frameIndex) / total))")
+        }
         print("wrote \(args.output.path) — \(frameIndex) frames")
     }
 }
