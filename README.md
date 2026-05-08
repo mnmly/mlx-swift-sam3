@@ -85,15 +85,9 @@ swift run Sam31ImageInfer \
   --weights weights/sam3.1-bf16 \
   --output out.png \
   --threshold 0.3
-
-swift run ImageInfer \
-  --image photo.jpg \
-  --prompt "animal" \
-  --tokenizer weights/sam3-bf16 \
-  --weights weights/sam3-bf16 \
-  --output out.png \
-  --threshold 0.3
 ```
+
+> SAM 3 (the older model) is supported as a library — use `Sam3Predictor.loadSAM3(...)` from your own code. The CLI examples target SAM 3.1 only; if you need a SAM 3 CLI, the simplest path is to copy `Examples/Sam31ImageInfer/Sam31ImageInfer.swift` and swap `Sam31Model` / `loadSAM31` for the SAM 3 equivalents.
 
 SAM 3.1 video tracking demos are also available:
 

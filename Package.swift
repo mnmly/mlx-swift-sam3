@@ -11,9 +11,7 @@ let package = Package(
     ],
     products: [
         .library(name: "MLXSAM3", targets: ["MLXSAM3"]),
-        .executable(name: "ImageInfer", targets: ["ImageInfer"]),
         .executable(name: "Sam31ImageInfer", targets: ["Sam31ImageInfer"]),
-        .executable(name: "VideoTrack", targets: ["VideoTrack"]),
         .executable(name: "Sam31VideoTrack", targets: ["Sam31VideoTrack"]),
         .executable(name: "Sam31VideoTrackFull", targets: ["Sam31VideoTrackFull"]),
         .executable(name: "sam3-bench", targets: ["sam3-bench"]),
@@ -37,28 +35,12 @@ let package = Package(
             path: "Sources/MLXSAM3"
         ),
         .executableTarget(
-            name: "ImageInfer",
-            dependencies: [
-                "MLXSAM3",
-                .product(name: "MLX", package: "mlx-swift"),
-            ],
-            path: "Examples/ImageInfer"
-        ),
-        .executableTarget(
             name: "Sam31ImageInfer",
             dependencies: [
                 "MLXSAM3",
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             path: "Examples/Sam31ImageInfer"
-        ),
-        .executableTarget(
-            name: "VideoTrack",
-            dependencies: [
-                "MLXSAM3",
-                .product(name: "MLX", package: "mlx-swift"),
-            ],
-            path: "Examples/VideoTrack"
         ),
         .executableTarget(
             name: "Sam31VideoTrack",
