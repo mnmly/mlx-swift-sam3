@@ -13,6 +13,9 @@ struct VideoDemoView: View {
     @State private var scoreThreshold: Float = 0.3
     @State private var frameStride = 5
     @State private var playbackFPS = 10.0
+    /// false = per-frame `SAM3Predictor.predict` (slim, IDs flicker).
+    /// true  = `Sam31VideoPipeline.processFrame` (full multiplex tracker, persistent IDs).
+    @State private var useFullTracker = false
     @State private var isProcessing = false
     @State private var isPlaying = false
     @State private var progress = 0.0
@@ -48,6 +51,12 @@ struct VideoDemoView: View {
 
             Text("Score threshold: \(scoreThreshold, specifier: "%.2f")").font(.caption)
             Slider(value: $scoreThreshold, in: 0.01...1.0, step: 0.01)
+
+            Toggle(isOn: $useFullTracker) {
+                Text("Persistent-ID tracking")
+            }
+            .toggleStyle(.switch)
+            .help("Off: per-frame detection, IDs flicker.\nOn: Sam31VideoPipeline with multiplex memory bank — persistent track IDs across frames.")
 
             Picker("Frame stride", selection: $frameStride) {
                 ForEach([1, 2, 3, 5, 10, 15], id: \.self) { stride in
@@ -167,6 +176,11 @@ struct VideoDemoView: View {
         let prompt = prompt
         let threshold = scoreThreshold
         let stride = frameStride
+        let trackerMode = useFullTracker
+
+        // Each video starts a fresh tracker session — persistent IDs are
+        // per-clip, not global.
+        if trackerMode { model.resetVideoTracker() }
 
         processingTask = Task {
             do {
@@ -178,7 +192,12 @@ struct VideoDemoView: View {
 
                 while let frame = source.nextFrame() {
                     if Task.isCancelled { break }
-                    let result = try await model.predictAsync(frame, prompt: prompt, scoreThreshold: threshold)
+                    let result: SAM3DisplayResult
+                    if trackerMode {
+                        result = try await model.trackFrameAsync(frame, prompt: prompt, scoreThreshold: threshold)
+                    } else {
+                        result = try await model.predictAsync(frame, prompt: prompt, scoreThreshold: threshold)
+                    }
                     collected.append(SAM3ProcessedFrame(image: frame, result: result))
                     index += 1
 

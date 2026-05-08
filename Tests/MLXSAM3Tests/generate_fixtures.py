@@ -538,10 +538,287 @@ def fixture_multiplex_mask_decoder():
 
 
 # ---------------------------------------------------------------------------
+# 12. SAM 3.1 image end-to-end (Phase 7 parity)
+# ---------------------------------------------------------------------------
+
+SAM31_MODEL_PATH = Path(os.path.expanduser(
+    "~/.cache/huggingface/hub/models--mlx-community--sam3.1-bf16/snapshots/a992e302ea9b0f03f41dfd93414a4fd0e818f65b"
+))
+
+
+def fixture_sam3_1_image_e2e():
+    """End-to-end image parity vs mlx-vlm sam3_1.Model.detect.
+
+    Generates synthetic pixel_values + tokenized prompt, runs the reference
+    model, dumps inputs + outputs (no weights — Swift loads same checkpoint).
+
+    Uses 336x336 input to keep fixture compact (vs production 1008).
+    """
+    import json
+    from mlx_vlm.models.sam3_1.sam3_1 import Model
+    from mlx_vlm.models.sam3_1.config import ModelConfig
+
+    with open(SAM31_MODEL_PATH / "config.json") as f:
+        cfg_dict = json.load(f)
+    cfg = ModelConfig.from_dict(cfg_dict)
+
+    model = Model(cfg)
+    weights = mx.load(str(SAM31_MODEL_PATH / "model.safetensors"))
+    # The mlx-community/sam3.1-bf16 snapshot is already in MLX OHWI layout —
+    # skip Model.sanitize (which would transpose Conv weights again).
+    # Cast bf16 → fp32 so the reference run is high-precision; Swift will also
+    # load with .float32 and the test can use a strict tolerance.
+    weights_fp32 = {k: v.astype(mx.float32) for k, v in weights.items()}
+    model.load_weights(list(weights_fp32.items()))
+    mx.eval(model.parameters())
+
+    # Synthetic deterministic inputs (fp32 for strict-parity reference).
+    H = W = 336
+    pixel_values = mx.random.normal([1, H, W, 3]).astype(mx.float32)
+
+    # CLIP-style tokenization: [BOS, "a", "person", EOS, PAD, ...] padded to T=8.
+    # Token IDs picked from sam3.1 tokenizer.json (49406=BOS, 49407=EOS, 320="a", 1746="person").
+    input_ids = mx.array([[49406, 320, 1746, 49407, 0, 0, 0, 0]], dtype=mx.int32)
+    attention_mask = mx.array([[1, 1, 1, 1, 0, 0, 0, 0]], dtype=mx.int32)
+
+    out = model.detect(
+        pixel_values=pixel_values,
+        input_ids=input_ids,
+        attention_mask=attention_mask,
+    )
+    mx.eval(*out.values())
+
+    arrays = {
+        "input/pixel_values": pixel_values,
+        "input/input_ids": input_ids,
+        "input/attention_mask": attention_mask,
+        "output/pred_logits": out["pred_logits"],
+        "output/pred_boxes": out["pred_boxes"],
+        "output/pred_masks": out["pred_masks"],
+        "output/presence_logits": out["presence_logits"],
+        # Intermediate boundary tensors for diagnosing where Swift diverges.
+        # encoder_hidden_states is the DETR encoder output (post text fusion).
+        # intermediate_hidden_states is the DETR decoder per-layer query hs
+        # (last layer = hs[-1] feeds dot_product_scoring + mask_decoder).
+        "output/encoder_hidden_states": out["encoder_hidden_states"],
+        "output/intermediate_hidden_states": out["intermediate_hidden_states"],
+    }
+    save("sam3_1_image_e2e", arrays)
+
+
+# ---------------------------------------------------------------------------
+# 13. SAM 3.1 video tracker (Phase 11.5b parity — minimal 3-frame loop)
+# ---------------------------------------------------------------------------
+
+def fixture_sam3_1_video_track():
+    """SAM 3.1 multiplex tracker components parity vs mlx-vlm sam3_1.Model.
+
+    Exercises the *new* tracker code paths not covered by image-detect:
+      A) memory_encoder(features, 32-ch mask) → memory   — multiplex mask path
+      B) memory_attention(src, memory)                   — cross-attn over bank
+
+    Skipped here:
+      - Model.track_init: passes a 1-channel mask but MultiplexMaskDownSampler
+        needs 32 (multiplex_count*2). Upstream bug — we feed a proper 32-ch mask.
+      - Model.track_step: the prompt encoder's dense_emb is pinned to the
+        production 72×72 grid; at smaller test resolutions the mask decoder's
+        `image_embeddings + dense_prompt_embeddings` add fails. Mask decoder
+        itself is already covered by testMultiplexMaskDecoderFixture.
+    """
+    import json
+    from mlx_vlm.models.sam3_1.sam3_1 import Model
+    from mlx_vlm.models.sam3_1.config import ModelConfig
+
+    with open(SAM31_MODEL_PATH / "config.json") as f:
+        cfg_dict = json.load(f)
+    cfg = ModelConfig.from_dict(cfg_dict)
+
+    model = Model(cfg)
+    weights = mx.load(str(SAM31_MODEL_PATH / "model.safetensors"))
+    weights_fp32 = {k: v.astype(mx.float32) for k, v in weights.items()}
+    model.load_weights(list(weights_fp32.items()))
+    mx.eval(model.parameters())
+
+    # --- Inputs --------------------------------------------------------
+    H = W = 336
+    pixel_values = mx.random.normal([1, H, W, 3]).astype(mx.float32)
+
+    # Run vision_encoder.backbone once to get realistic propagation features
+    # (1x scale, ~24×24 at 336 input).
+    backbone0 = model.detector_model.vision_encoder.backbone(pixel_values)
+    prop0 = model._get_tracker_features(backbone0)
+    features0 = prop0[2]  # (1, H_f, W_f, 256)
+    Hf, Wf, D = features0.shape[1], features0.shape[2], features0.shape[3]
+
+    # 32-channel mask at the feature spatial × down-sampler upscale ratio.
+    # MultiplexMaskDownSampler does 4× progressive downsample, so we need
+    # input mask = features × 4 in each spatial dim.
+    mask_H = Hf * (2 ** 4)  # 4 stages of stride-2 downsample
+    mask_W = Wf * (2 ** 4)
+    mask_in = mx.random.normal([1, mask_H, mask_W, 32]).astype(mx.float32)
+
+    # --- A) memory_encoder direct ------------------------------------
+    memory_feats = model.tracker_model.memory_encoder(features0, mask_in)
+    B = memory_feats.shape[0]
+    memory_0 = memory_feats.reshape(B, -1, memory_feats.shape[-1])
+
+    # --- B) memory_attention(src, memory) ----------------------------
+    # Synthetic src (current frame's flattened image features) at feature
+    # spatial size; memory comes from stage A output.
+    src = mx.random.normal([1, Hf * Wf, D]).astype(mx.float32)
+
+    # Step manually to capture per-layer outputs (for divergence localization).
+    ma = model.tracker_model.memory_attention
+    layer_outputs = []
+
+    # --- Manual layer 0 with sub-stage dumps ---------------------------
+    layer0 = ma.layers[0]
+    residual = src
+    src_normed = layer0.norm1(src)
+    q = layer0.self_attn_q_proj(src_normed)
+    k = layer0.self_attn_k_proj(src_normed)
+    v = layer0.self_attn_v_proj(src_normed)
+    # Dump pre-rope q/k/v and the rope freqs themselves for parity localization.
+    sa_pre_q, sa_pre_k, sa_pre_v = q, k, v
+    sa_freqs_cos = layer0.self_attention_rope._freqs_cos
+    sa_freqs_sin = layer0.self_attention_rope._freqs_sin
+    sa_pre = layer0.self_attention_rope(q, k, v)
+    sa_proj = layer0.self_attn_out_proj(sa_pre)
+    after_sa = residual + sa_proj
+
+    residual = after_sa
+    n2 = layer0.norm2(after_sa)
+    q2 = layer0.cross_attn_q_proj(n2) + layer0.image_cross_attn_q_proj(n2)
+    k2 = layer0.cross_attn_k_proj(memory_0) + layer0.image_cross_attn_k_proj(memory_0)
+    v2 = layer0.cross_attn_v_proj(memory_0)
+    ca_pre = layer0.cross_attention_rope(q2, k2, v2)
+    ca_proj = layer0.cross_attn_out_proj(ca_pre)
+    after_ca = residual + ca_proj
+
+    after_ffn = after_ca + layer0.linear2(mx.maximum(layer0.linear1(layer0.norm3(after_ca)), 0))
+    layer_outputs.append(after_ffn)
+
+    cur = after_ffn
+    for layer in ma.layers[1:]:
+        cur = layer(cur, memory_0)
+        layer_outputs.append(cur)
+    attended = ma.layer_norm(cur)
+
+    mx.eval(memory_feats, memory_0, attended, after_sa, after_ca, sa_pre, sa_pre_q, sa_pre_k, sa_pre_v, sa_freqs_cos, sa_freqs_sin, *layer_outputs)
+
+    arrays = {
+        # Inputs
+        "input/features_0": features0,
+        "input/mask_in": mask_in,
+        "input/src": src,
+        # Stage A outputs (memory_encoder)
+        "output/memory_feats": memory_feats,    # (B, H_f, W_f, D) — pre-reshape
+        "output/memory_0": memory_0,            # (B, H_f*W_f, D) — bank layout
+        # Sub-stage outputs of layer 0 (for divergence localization)
+        "output/l0_after_sa": after_sa,
+        "output/l0_after_ca": after_ca,
+        # Pre-RoPE q/k/v of layer-0 self-attn (input to SimpleRoPEAttention)
+        "output/l0_sa_q": sa_pre_q,
+        "output/l0_sa_k": sa_pre_k,
+        "output/l0_sa_v": sa_pre_v,
+        # Post-RoPE+SDPA output (input to self_attn_out_proj)
+        "output/l0_sa_pre": sa_pre,
+        # RoPE freqs themselves (init_2d_freqs result)
+        "output/l0_sa_freqs_cos": sa_freqs_cos,
+        "output/l0_sa_freqs_sin": sa_freqs_sin,
+        # Stage B outputs (memory_attention) + per-layer
+        "output/attended": attended,
+    }
+    for i, out_i in enumerate(layer_outputs):
+        arrays[f"output/ma_layer_{i}"] = out_i
+    save("sam3_1_video_track", arrays)
+
+
+# ---------------------------------------------------------------------------
+# 14. SAM 3.1 track_step end-to-end at production resolution (Phase 11.5b)
+# ---------------------------------------------------------------------------
+
+def fixture_sam3_1_track_step():
+    """Full track_step parity at 1008×1008 (production resolution).
+
+    At production resolution, the prompt encoder's dense_emb (72×72) matches
+    the feature spatial size, so MultiplexMaskDecoder's
+    `image_embeddings + dense_prompt_embeddings` works.
+
+    Uses synthetic features/memory (avoids saving the 12 MB pixel_values; vision
+    backbone is already covered by testViTBackboneFixture / testVisionEncoderFixture).
+    """
+    import json
+    from mlx_vlm.models.sam3_1.sam3_1 import Model
+    from mlx_vlm.models.sam3_1.config import ModelConfig
+
+    with open(SAM31_MODEL_PATH / "config.json") as f:
+        cfg_dict = json.load(f)
+    cfg = ModelConfig.from_dict(cfg_dict)
+
+    model = Model(cfg)
+    weights = mx.load(str(SAM31_MODEL_PATH / "model.safetensors"))
+    weights_fp32 = {k: v.astype(mx.float32) for k, v in weights.items()}
+    model.load_weights(list(weights_fp32.items()))
+    mx.eval(model.parameters())
+
+    # Discover the actual prop_fpn shapes by running the backbone once at 1008
+    # — kept in-process; not saved to fixture.
+    pix = mx.random.normal([1, 1008, 1008, 3]).astype(mx.float32)
+    backbone = model.detector_model.vision_encoder.backbone(pix)
+    prop = model._get_tracker_features(backbone)
+    feat_shapes = [tuple(p.shape) for p in prop]
+    print(f"  prop_fpn shapes: {feat_shapes}")
+    Hf, Wf, D = prop[2].shape[1], prop[2].shape[2], prop[2].shape[3]
+
+    # Replace with synthetic tensors of identical shape (deterministic seed → reproducible).
+    mx.random.seed(7)
+    features = mx.random.normal(prop[2].shape).astype(mx.float32)
+    high_res_0 = mx.random.normal(prop[0].shape).astype(mx.float32)
+    high_res_1 = mx.random.normal(prop[1].shape).astype(mx.float32)
+    memory_0 = mx.random.normal([1, Hf * Wf, D]).astype(mx.float32) * 0.1  # encoded-feature scale
+
+    # Run track_step at production resolution with memory bank.
+    out = model.tracker_model.track_step(
+        current_features=features,
+        memory_bank=[memory_0],
+        high_res_features=[high_res_0, high_res_1],
+    )
+    mx.eval(out["pred_masks"], out["iou_scores"], out["obj_scores"], out["object_pointer"])
+
+    arrays = {
+        # Inputs (synthetic, fixed-seed)
+        "input/features": features,
+        "input/high_res_0": high_res_0,
+        "input/high_res_1": high_res_1,
+        "input/memory_0": memory_0,
+        # Outputs
+        "output/pred_masks": out["pred_masks"],
+        "output/iou_scores": out["iou_scores"],
+        "output/obj_scores": out["obj_scores"],
+        "output/object_pointer": out["object_pointer"],
+    }
+    save("sam3_1_track_step", arrays)
+
+
+# ---------------------------------------------------------------------------
 # Updated Main
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "sam3_1_image_e2e":
+        print("Generating sam3_1_image_e2e only...")
+        fixture_sam3_1_image_e2e()
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "sam3_1_video_track":
+        print("Generating sam3_1_video_track only...")
+        fixture_sam3_1_video_track()
+        sys.exit(0)
+    if len(sys.argv) > 1 and sys.argv[1] == "sam3_1_track_step":
+        print("Generating sam3_1_track_step only...")
+        fixture_sam3_1_track_step()
+        sys.exit(0)
+
     print("Generating fixtures...")
 
     print("1. PositionEmbeddingSine")

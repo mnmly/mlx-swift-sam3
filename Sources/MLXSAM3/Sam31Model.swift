@@ -259,7 +259,8 @@ public class Sam31Model: Module {
         promptBoxNormalized box: MLXArray
     ) -> [String: MLXArray] {
         let features = prop[2]
-        let highRes = prop.count > 2 ? [prop[0], prop[1]] : nil
+        // Order matches python: hrf[0]=mid-spatial (144x144) for upscale_conv1+, hrf[1]=large (288x288) for upscale_conv2+.
+        let highRes = prop.count > 2 ? [prop[1], prop[0]] : nil
         return trackerModel.trackStep(
             currentFeatures: features,
             memoryBank: nil,
@@ -269,6 +270,149 @@ public class Sam31Model: Module {
             multimaskOutput: false,
             highResFeatures: highRes
         )
+    }
+
+    /// Encode a single object's predicted mask + propagation features into a multiplex
+    /// memory entry suitable for the memory bank.
+    ///
+    /// Mirrors python/sam3's multiplex `_encode_new_memory` for the single-object case:
+    ///   mask_for_mem = sigmoid(logits) * 2.0 + (-1.0)        // SAM 3.1 defaults
+    ///   mux into multiplex slot 0 (channels 1..15 zeroed)
+    ///   append conditioning-flag channel (1.0 on prompt/init frame, 0.0 otherwise),
+    ///   also muxed → channels 17..31 zeroed
+    ///   final mask input: (1, H, W, 32)
+    ///
+    /// - Parameters:
+    ///   - features: (1, H_f, W_f, 256) propagation FPN level [2] (1× scale).
+    ///   - maskLogits: (1, H_m, W_m) raw mask logits (NOT sigmoid). Will be upsampled
+    ///     to mask_downsampler input resolution = features × 16 along each spatial dim.
+    ///   - isConditioning: true if this frame had an explicit prompt (e.g. detection
+    ///     match or user click); affects the conditioning channel.
+    /// - Returns: encoded memory at (1, H_f * W_f, 256) — track_step bank layout.
+    public func encodeMaskToMemory(
+        features: MLXArray,
+        maskLogits: MLXArray,
+        isConditioning: Bool,
+        alreadySigmoid: Bool = false
+    ) -> MLXArray {
+        // SAM 3.1 multiplex defaults (HF config); could be lifted from Sam31TrackerConfig
+        // if Sam31Model stored the config — currently it doesn't.
+        let multiplex = 16                                   // multiplex_count
+        let totalCh = multiplex * 2                          // 32
+        let hf = features.dim(1), wf = features.dim(2), d = features.dim(3)
+        let downsampleStride = 16                            // mask_downsampler_total_stride
+        let mh = hf * downsampleStride, mw = wf * downsampleStride
+
+        // 1. Upsample mask logits (1, H_m, W_m) → (1, mh, mw, 1) via bilinear.
+        let logits4 = maskLogits[.newAxis, .ellipsis, .newAxis] // (1, 1, H_m, W_m, 1) → drop one
+        // Actually maskLogits is already (1, H_m, W_m). Add channel dim for Upsample.
+        let logits = maskLogits.reshaped([1, maskLogits.dim(1), maskLogits.dim(2), 1])
+        let scaleH = Float(mh) / Float(logits.dim(1))
+        let scaleW = Float(mw) / Float(logits.dim(2))
+        let up = Upsample(scaleFactor: .array([scaleH, scaleW]), mode: .linear(alignCorners: false))(logits)
+        // 2. mask_for_mem = sigmoid(up) * 2.0 - 1.0 (SAM 3.1 defaults from model_builder.py).
+        //    If caller already applied sigmoid, just rescale.
+        let probs = alreadySigmoid ? up : sigmoid(up)
+        let maskForMem = probs * MLXArray(Float(2.0)) - MLXArray(Float(1.0))
+
+        // 3. Build 32-channel input. Slot 0 = mask, slots 1..15 = 0; chan 16 = cond flag, 17..31 = 0.
+        let zerosMask = MLXArray.zeros([1, mh, mw, multiplex - 1], dtype: maskForMem.dtype)
+        let condValue: Float = isConditioning ? 1.0 : 0.0
+        let condFlag = MLXArray.full([1, mh, mw, 1], values: MLXArray(condValue))
+            .asType(maskForMem.dtype)
+        let zerosCond = MLXArray.zeros([1, mh, mw, multiplex - 1], dtype: maskForMem.dtype)
+        let stacked = concatenated([maskForMem, zerosMask, condFlag, zerosCond], axis: -1)
+        // Sanity: should be (1, mh, mw, 32).
+        assert(stacked.dim(-1) == totalCh)
+
+        let memory = trackerModel.memoryEncoder(features, stacked)
+        // NOTE: python applies a no_obj_embed_spatial correction here:
+        //   maskmem += sum_over_inactive_slots(no_obj_embed_spatial[i]) broadcast over HW.
+        // Adding it in Swift regressed mean IoU 0.312 → 0.167 on the 10-frame fixture.
+        // Mathematically equivalent to python's `((1-is_obj_appearing) * noObj).sum(dim=1)`
+        // but somehow worsens parity. Possible causes: (a) python's effective values for
+        // is_obj_appearing differ for active slots in our setup; (b) downstream consumers
+        // see DOUBLE correction once it's already on memory_attention values. Disabled
+        // until properly diagnosed (see Phase 11.5c memory).
+        return memory.reshaped([1, -1, d])
+    }
+
+    /// Multi-track variant of `encodeMaskToMemory`: encodes up to multiplex_count=16
+    /// tracks' masks into ONE shared 32-channel memory entry (the proper multiplex
+    /// encoding python/sam3 uses). Slots beyond `maskLogitsList.count` are zeroed.
+    ///
+    /// - Parameters:
+    ///   - features: (1, H_f, W_f, 256) propagation FPN level [2].
+    ///   - maskLogitsList: per-slot mask logits, each (1, H, W). Up to 16 slots.
+    ///   - isConditioningList: per-slot conditioning flag.
+    ///   - alreadySigmoid: pass true if logits are already in [0,1] (post-sigmoid).
+    public func encodeMultiplexMasksToMemory(
+        features: MLXArray,
+        maskLogitsList: [MLXArray],
+        isConditioningList: [Bool],
+        alreadySigmoid: Bool = false
+    ) -> MLXArray {
+        let multiplex = 16
+        let downsampleStride = 16
+        let n = maskLogitsList.count
+        precondition(n == isConditioningList.count, "mismatched slot counts")
+        precondition(n > 0 && n <= multiplex, "1..16 slots required")
+        let hf = features.dim(1), wf = features.dim(2), d = features.dim(3)
+        let mh = hf * downsampleStride, mw = wf * downsampleStride
+
+        // Per-slot upsampled mask values: (1, mh, mw, 1) each.
+        var slotMasks: [MLXArray] = []
+        slotMasks.reserveCapacity(multiplex)
+        for logit in maskLogitsList {
+            let logit3 = logit.reshaped([1, logit.dim(1), logit.dim(2), 1])
+            let scaleH = Float(mh) / Float(logit3.dim(1))
+            let scaleW = Float(mw) / Float(logit3.dim(2))
+            let up = Upsample(scaleFactor: .array([scaleH, scaleW]), mode: .linear(alignCorners: false))(logit3)
+            let probs = alreadySigmoid ? up : sigmoid(up)
+            let slot = probs * MLXArray(Float(2.0)) - MLXArray(Float(1.0))
+            slotMasks.append(slot)
+        }
+        // Pad with zeros up to multiplex slots.
+        let padCount = multiplex - n
+        if padCount > 0 {
+            let zeroSlot = MLXArray.zeros([1, mh, mw, 1], dtype: slotMasks[0].dtype)
+            for _ in 0..<padCount { slotMasks.append(zeroSlot) }
+        }
+
+        // Per-slot conditioning flags: each (1, mh, mw, 1) filled with 1.0 or 0.0.
+        var slotConds: [MLXArray] = []
+        slotConds.reserveCapacity(multiplex)
+        for cond in isConditioningList {
+            let v: Float = cond ? 1.0 : 0.0
+            slotConds.append(MLXArray.full([1, mh, mw, 1], values: MLXArray(v)).asType(slotMasks[0].dtype))
+        }
+        if padCount > 0 {
+            let zeroCond = MLXArray.zeros([1, mh, mw, 1], dtype: slotMasks[0].dtype)
+            for _ in 0..<padCount { slotConds.append(zeroCond) }
+        }
+
+        // Concatenate: 16 mask channels followed by 16 condition channels = 32.
+        let stacked = concatenated(slotMasks + slotConds, axis: -1)
+        precondition(stacked.dim(-1) == multiplex * 2)
+
+        let mem = trackerModel.memoryEncoder(features, stacked)
+        // NOTE: no_obj_embed_spatial correction disabled (regresses on 10-frame test).
+        // See `encodeMaskToMemory` for context.
+        return mem.reshaped([1, -1, d])
+    }
+
+    @available(*, deprecated, message: "Buggy single-channel encoding; use encodeMaskToMemory.")
+    public func trackInit(
+        backboneFeatures: MLXArray,
+        detectionMasks: MLXArray
+    ) -> (memory: MLXArray, features: MLXArray) {
+        let prop = getTrackerFeatures(backboneFeatures)
+        let features = prop[2]
+        let b = features.dim(0), d = features.dim(3)
+        let maskInput = detectionMasks[0..., ..<1].transposed(0, 2, 3, 1)
+        let memory = trackerModel.memoryEncoder(features, maskInput)
+        let flat = memory.reshaped([b, -1, d])
+        return (memory: flat, features: features)
     }
 
     public func trackStep(
@@ -281,7 +425,7 @@ public class Sam31Model: Module {
     ) -> [String: MLXArray] {
         let prop = getTrackerFeatures(backboneFeatures)
         let features = prop[2]
-        let highRes = prop.count > 1 ? [prop[0], prop[1]] : nil
+        let highRes = prop.count > 1 ? [prop[1], prop[0]] : nil
         return trackerModel.trackStep(
             currentFeatures: features,
             memoryBank: memoryBank,

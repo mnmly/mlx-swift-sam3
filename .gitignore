@@ -13,6 +13,7 @@ out.png
 
 # Local fixtures and weights — regenerate via scripts/export_fixtures.py
 Tests/MLXSAM3Tests/Fixtures/*.safetensors
+Tests/MLXSAM3Tests/Fixtures/sam3_1_video_track_*frame/
 weights/
 .venv/
 __pycache__/

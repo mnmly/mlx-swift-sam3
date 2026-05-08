@@ -2,9 +2,10 @@
 //
 
 // build: xcodebuild -scheme ImageInfer -destination 'platform=macOS' build -derivedDataPath .build/xcode
-// convert the pytorch checkpoint to mlx safetensors via python
-// uv run scripts/convert_pytorch_to_mlx.py--checkpoint /path/to/pytorch/sam3_checkpoint.pth --output /path/to/mlx/sam3_checkpoint.safetensors
-// SNAP: weights/mlx-sam3
+// fetch pre-converted weights:
+//   ./Scripts/download_weights.sh mlx-community/sam3-bf16          # for SAM 3
+//   ./Scripts/download_weights.sh mlx-community/sam3.1-bf16        # for SAM 3.1
+// SNAP: weights/sam3-bf16  (or weights/sam3.1-bf16)
 // run .build/xcode/Build/Products/Debug/ImageInfer \
 // --image ~/Downloads/default.jpeg \
 // --prompt "animals" \

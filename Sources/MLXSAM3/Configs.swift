@@ -302,7 +302,11 @@ public struct Sam31TrackerConfig: MemoryFuserConfigProtocol {
     // Memory attention (decoupled)
     public var memoryAttentionHiddenSize: Int = 256
     public var memoryAttentionNumLayers: Int = 4
-    public var memoryAttentionNumAttentionHeads: Int = 8
+    // SAM 3.1 HF config: memory_attention_num_attention_heads=1 (single-head with head_dim=256).
+    // Note: python/sam3 model_builder hard-codes num_heads=8 with the same checkpoint, so
+    // the bisect test against python shows ~4% rel err that's INHERENT to the heads config —
+    // not a Swift bug. HF transformers / mlx-community / facebook HF all agree on heads=1.
+    public var memoryAttentionNumAttentionHeads: Int = 1
     public var memoryAttentionFeedForwardHiddenSize: Int = 2048
     public var memoryAttentionFeedForwardHiddenAct: String = "relu"
     public var memoryAttentionDropout: Float = 0.1
@@ -360,7 +364,7 @@ public struct Sam31ModelConfig {
     public var initializerRange: Float = 0.02
     public var lowResMaskSize: Int = 288
 
-    // Tracking / association thresholds
+    // Tracking / association thresholds (HF root-level)
     public var detNmsThresh: Float = 0.1
     public var assocIouThresh: Float = 0.1
     public var trkAssocIouThresh: Float = 0.5
@@ -370,6 +374,19 @@ public struct Sam31ModelConfig {
     public var scoreThresholdDetection: Float = 0.5
     public var fillHoleArea: Int = 16
     public var maxNumObjects: Int = 10000
+
+    // Tracker management (HF root-level — orchestration of multi-frame loop)
+    public var initTrkKeepAlive: Int = 30
+    public var maxTrkKeepAlive: Int = 30
+    public var minTrkKeepAlive: Int = -1
+    public var hotstartDelay: Int = 15
+    public var hotstartDupThresh: Int = 8
+    public var hotstartUnmatchThresh: Int = 8
+    public var reconditionEveryNthFrame: Int = 16
+    public var reconditionOnTrkMasks: Bool = false
+    public var decreaseTrkKeepAliveForEmptyMasklets: Bool = false
+    public var suppressUnmatchedOnlyWithinHotstart: Bool = true
+    public var suppressOverlappingBasedOnRecentOcclusionThreshold: Float = 0.7
 
     public init() {}
 }

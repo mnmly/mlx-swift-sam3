@@ -5,6 +5,7 @@ import MLX
 import MLXSAM3
 
 extension SAM3Predictor: @unchecked @retroactive Sendable {}
+extension Sam31VideoPipeline: @unchecked @retroactive Sendable {}
 
 struct SAM3DisplayResult: Sendable {
     var detections: [SAM3DisplayDetection]
@@ -19,6 +20,10 @@ struct SAM3DisplayDetection: Identifiable, Sendable {
     var box: [Float]
     var score: Float
     var mask: [UInt8]
+    /// Persistent track id from `Sam31VideoPipeline` (nil for per-frame
+    /// detections). When set, the overlay colors by trackId so a given object
+    /// keeps the same color across frames.
+    var trackId: Int?
 }
 
 struct SAM3ProcessedFrame: Sendable {
@@ -64,10 +69,35 @@ nonisolated func makeDisplayResult(from prediction: SAM3ImagePrediction, width: 
             id: i,
             box: box,
             score: scores[i],
-            mask: Array(masks[start..<end])
+            mask: Array(masks[start..<end]),
+            trackId: nil
         ))
     }
 
+    return SAM3DisplayResult(detections: detections, imageWidth: width, imageHeight: height)
+}
+
+nonisolated func makeDisplayResult(
+    fromTracks tracks: [TrackedObject],
+    width: Int,
+    height: Int
+) -> SAM3DisplayResult {
+    var detections: [SAM3DisplayDetection] = []
+    detections.reserveCapacity(tracks.count)
+    for (i, track) in tracks.enumerated() {
+        let box = track.lastBoxPixels
+        var maskBytes: [UInt8] = []
+        if let mask = track.lastMask {
+            maskBytes = mask.asType(.uint8).asArray(UInt8.self)
+        }
+        detections.append(SAM3DisplayDetection(
+            id: i,
+            box: box,
+            score: track.lastScore,
+            mask: maskBytes,
+            trackId: track.id
+        ))
+    }
     return SAM3DisplayResult(detections: detections, imageWidth: width, imageHeight: height)
 }
 

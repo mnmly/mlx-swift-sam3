@@ -12,6 +12,9 @@ struct CameraDemoView: View {
     @State private var result: SAM3DisplayResult?
     @State private var prompt = "a person"
     @State private var scoreThreshold: Float = 0.3
+    /// false = per-frame `SAM3Predictor.predict` (slim, IDs flicker).
+    /// true  = `Sam31VideoPipeline.processFrame` (persistent IDs across frames).
+    @State private var useFullTracker = false
     @State private var isRunning = false
     @State private var inferenceInFlight = false
     @State private var errorMessage: String?
@@ -49,6 +52,15 @@ struct CameraDemoView: View {
 
             Text("Score threshold: \(scoreThreshold, specifier: "%.2f")").font(.caption)
             Slider(value: $scoreThreshold, in: 0.01...1.0, step: 0.01)
+
+            Toggle(isOn: $useFullTracker) {
+                Text("Persistent-ID tracking")
+            }
+            .toggleStyle(.switch)
+            .help("Off: per-frame detection, IDs flicker.\nOn: persistent IDs via Sam31VideoPipeline.")
+            .onChange(of: useFullTracker) { _, _ in
+                model.resetVideoTracker()
+            }
 
             Button {
                 if isRunning {
@@ -119,6 +131,9 @@ struct CameraDemoView: View {
             }
         }
 
+        // Fresh tracker session per camera start.
+        model.resetVideoTracker()
+
         do {
             try capture.start(deviceID: deviceID)
             isRunning = true
@@ -156,9 +171,14 @@ struct CameraDemoView: View {
 
         let prompt = prompt
         let threshold = scoreThreshold
+        let trackerMode = useFullTracker
         Task {
             do {
-                result = try await model.predictAsync(cgImage, prompt: prompt, scoreThreshold: threshold)
+                if trackerMode {
+                    result = try await model.trackFrameAsync(cgImage, prompt: prompt, scoreThreshold: threshold)
+                } else {
+                    result = try await model.predictAsync(cgImage, prompt: prompt, scoreThreshold: threshold)
+                }
             } catch {
                 errorMessage = error.localizedDescription
             }

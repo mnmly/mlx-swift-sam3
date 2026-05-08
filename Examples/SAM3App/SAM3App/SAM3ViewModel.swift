@@ -7,6 +7,7 @@ import MLXSAM3
 @MainActor
 final class SAM3ViewModel: ObservableObject {
     @Published var predictor: SAM3Predictor?
+    @Published var videoPipeline: Sam31VideoPipeline?
     @Published var isLoaded = false
     @Published var isLoading = false
     @Published var errorMessage: String?
@@ -30,26 +31,45 @@ final class SAM3ViewModel: ObservableObject {
                 }
             }
             let loaded = try await Task.detached(priority: .userInitiated) {
+                () -> (SAM3Predictor, Sam31VideoPipeline) in
                 let tokenizer = try await SAM3Tokenizer.fromSnapshotOrOpenAIClip(
                     directory,
                     maxLength: 32
                 )
                 let model = Sam31Model(Sam31ModelConfig())
                 try ModelLoader.load(sam31: model, from: directory, dtype: .bfloat16)
-                return SAM3Predictor(
+                let imagePredictor = SAM3Predictor(
                     model: model,
                     tokenizer: tokenizer,
                     resolution: 1008,
                     scoreThreshold: threshold
                 )
+                // Share the same loaded `model` between the image predictor and the
+                // video tracker — there's no need to load weights twice.
+                let tracker = Sam31VideoTracker(
+                    model: model,
+                    resolution: 1008,
+                    dtype: .bfloat16,
+                    detectThreshold: threshold,
+                    redetectEvery: 15
+                )
+                let videoPipeline = Sam31VideoPipeline(
+                    tracker: tracker,
+                    tokenizer: tokenizer,
+                    resolution: 1008,
+                    dtype: .bfloat16
+                )
+                return (imagePredictor, videoPipeline)
             }.value
-            predictor = loaded
-            resolution = loaded.resolution
+            predictor = loaded.0
+            videoPipeline = loaded.1
+            resolution = loaded.0.resolution
             isLoaded = true
             loadedURL = directory
         } catch {
             errorMessage = Self.describeLoadError(error, directory: directory)
             predictor = nil
+            videoPipeline = nil
             isLoaded = false
         }
     }
@@ -77,6 +97,35 @@ final class SAM3ViewModel: ObservableObject {
                 height: cgImage.height
             )
         }.value
+    }
+
+    /// Run one frame through the persistent-ID video tracker. Caller is responsible
+    /// for calling `resetVideoTracker()` when starting a new clip / camera session.
+    nonisolated func trackFrameAsync(
+        _ cgImage: CGImage,
+        prompt: String,
+        scoreThreshold: Float
+    ) async throws -> SAM3DisplayResult {
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedPrompt.isEmpty else { throw SAM3AppError.emptyPrompt }
+        guard let pipeline = await self.videoPipeline else {
+            throw SAM3AppError.modelNotLoaded
+        }
+
+        return try await Task.detached(priority: .userInitiated) {
+            pipeline.tracker.detectThreshold = scoreThreshold
+            pipeline.setTextPrompt(trimmedPrompt)
+            let frame = try pipeline.processFrame(cgImage)
+            return makeDisplayResult(
+                fromTracks: frame.tracks,
+                width: cgImage.width,
+                height: cgImage.height
+            )
+        }.value
+    }
+
+    func resetVideoTracker() {
+        videoPipeline?.reset()
     }
 
     private static func describeLoadError(_ error: Error, directory: URL) -> String {

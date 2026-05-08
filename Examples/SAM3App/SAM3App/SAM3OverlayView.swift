@@ -63,14 +63,14 @@ struct SAM3OverlayView: View {
                 width: CGFloat(b[2] - b[0]) * scale,
                 height: CGFloat(b[3] - b[1]) * scale
             )
-            let color = colorAt(index)
+            // Persistent track id (when present) gives a stable color across
+            // frames; per-frame predictions fall back to iteration index.
+            let colorIndex = detection.trackId ?? index
+            let color = colorAt(colorIndex)
             context.stroke(Path(rect), with: .color(color), lineWidth: 2)
-            drawTag(
-                text: String(format: "#%d %.2f", index + 1, detection.score),
-                at: rect.origin,
-                color: color,
-                in: context
-            )
+            let tag = detection.trackId.map { String(format: "id %d  %.2f", $0, detection.score) }
+                ?? String(format: "#%d %.2f", index + 1, detection.score)
+            drawTag(text: tag, at: rect.origin, color: color, in: context)
         }
     }
 
@@ -81,7 +81,8 @@ struct SAM3OverlayView: View {
 
         var pixels = [UInt8](repeating: 0, count: h * w * 4)
         for (i, detection) in result.detections.enumerated() {
-            let color = Self.palette[i % Self.palette.count]
+            let colorIndex = detection.trackId ?? i
+            let color = Self.palette[colorIndex % Self.palette.count]
             let r = UInt8(color.x * 255)
             let g = UInt8(color.y * 255)
             let b = UInt8(color.z * 255)

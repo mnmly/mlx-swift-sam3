@@ -22,12 +22,19 @@ public struct SAM3ImagePrediction {
     public let maskLogits: MLXArray   // (N, H, W) float, post-sigmoid
     public let boxes: MLXArray        // (N, 4) xyxy in original pixel coords
     public let scores: MLXArray       // (N,) presence * class prob
+    /// Per-kept-detection original query indices into the raw model output
+    /// (e.g. `outputs["pred_masks"]`). Same length as `boxes`/`scores`.
+    /// Useful when callers need the *raw, square* low-res mask logits for
+    /// downstream encoding that wants un-resampled spatial structure.
+    public let keptQueryIndices: [Int]
 
-    public init(masks: MLXArray, maskLogits: MLXArray, boxes: MLXArray, scores: MLXArray) {
+    public init(masks: MLXArray, maskLogits: MLXArray, boxes: MLXArray, scores: MLXArray,
+                keptQueryIndices: [Int] = []) {
         self.masks = masks
         self.maskLogits = maskLogits
         self.boxes = boxes
         self.scores = scores
+        self.keptQueryIndices = keptQueryIndices
     }
 }
 
@@ -95,12 +102,13 @@ public final class SAM3ImagePredictor {
             let emptyScores = MLXArray.zeros([0])
             return SAM3ImagePrediction(
                 masks: emptyMasks, maskLogits: emptyLogits,
-                boxes: emptyBoxes, scores: emptyScores)
+                boxes: emptyBoxes, scores: emptyScores, keptQueryIndices: [])
         }
         let idx = MLXArray(keepIdx)
         var keptScores = scores.take(idx, axis: 0)
         var keptBoxes = boxesN.take(idx, axis: 0)
         var keptMasks = masksN.take(idx, axis: 0)
+        var keptQuery: [Int] = keepIdx.map { Int($0) }
 
         if let nmsThreshold, nmsThreshold > 0, keepIdx.count > 1 {
             let nmsKeep = nmsIndices(
@@ -112,6 +120,7 @@ public final class SAM3ImagePredictor {
             keptScores = keptScores.take(nmsIdx, axis: 0)
             keptBoxes = keptBoxes.take(nmsIdx, axis: 0)
             keptMasks = keptMasks.take(nmsIdx, axis: 0)
+            keptQuery = nmsKeep.map { keptQuery[Int($0)] }
         }
 
         // Scale boxes (xyxy, normalized [0,1]) back to pixel coords.
@@ -129,7 +138,8 @@ public final class SAM3ImagePredictor {
 
         return SAM3ImagePrediction(
             masks: maskBool, maskLogits: maskLogits,
-            boxes: pxBoxes, scores: keptScores
+            boxes: pxBoxes, scores: keptScores,
+            keptQueryIndices: keptQuery
         )
     }
 

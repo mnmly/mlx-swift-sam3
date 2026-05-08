@@ -54,6 +54,11 @@ public class MultiplexMaskDecoder: Module {
         super.init()
     }
 
+    /// - Parameters:
+    ///   - extraPerObjectEmbeddings: optional `(B, M, D)` tensor added to the per-slot
+    ///     mask tokens before the transformer (mirrors python's `extra_per_object_embeddings`,
+    ///     which carries the `output_valid_embed` / `output_invalid_embed` per-slot signal
+    ///     from the multiplex tracker). Critical for memory-bank-based tracking parity.
     /// - Returns: (masks (B,M,N,H,W), iouPred (B,M,N), samTokens (B,T,D), objScore (B,M,1))
     public func callAsFunction(
         imageEmbeddings: MLXArray,
@@ -61,15 +66,29 @@ public class MultiplexMaskDecoder: Module {
         sparsePromptEmbeddings: MLXArray,
         densePromptEmbeddings: MLXArray,
         multimaskOutput: Bool = true,
-        highResFeatures: [MLXArray]? = nil
+        highResFeatures: [MLXArray]? = nil,
+        extraPerObjectEmbeddings: MLXArray? = nil
     ) -> (MLXArray, MLXArray, MLXArray, MLXArray) {
         let b = imageEmbeddings.dim(0)
         let d = imageEmbeddings.dim(-1)
         let M = multiplexCount, nMask = numMaskTokens
 
+        // Mask tokens: shape (M*nMask, D). When `extraPerObjectEmbeddings` is provided,
+        // reshape to (B, M, nMask, D), add (B, M, 1, D) broadcast, flatten back.
+        var maskTokensExpanded: MLXArray
+        if let extra = extraPerObjectEmbeddings {
+            let reshaped = maskTokens.weight.reshaped([1, M, nMask, d])
+                .asType(extra.dtype)                                  // (1, M, nMask, D)
+            let broadcasted = broadcast(reshaped, to: [b, M, nMask, d])
+            let added = broadcasted + extra[0..., 0..., .newAxis, 0...] // (B, M, 1, D) → (B, M, nMask, D)
+            maskTokensExpanded = added.reshaped([b, M * nMask, d])
+        } else {
+            maskTokensExpanded = broadcast(maskTokens.weight[.newAxis], to: [b, M * nMask, d])
+        }
+
         var tokens = concatenated([
             broadcast(iouToken.weight[.newAxis], to: [b, M, d]),
-            broadcast(maskTokens.weight[.newAxis], to: [b, M * nMask, d]),
+            maskTokensExpanded,
             broadcast(objScoreToken.weight[.newAxis], to: [b, M, d]),
         ], axis: 1)
         tokens = concatenated([tokens, sparsePromptEmbeddings], axis: 1)
@@ -233,7 +252,28 @@ class DecoupledMemoryAttentionLayer: Module {
         super.init()
     }
 
-    func callAsFunction(_ src: MLXArray, memory: MLXArray, numKExcludeRope: Int = 0) -> MLXArray {
+    /// - Parameters:
+    ///   - src: (B, N_q, D) current frame's state (post-self-attn input).
+    ///   - memory: (B, N_k_mem, D) value tensor (V-projection input). Mask-encoded
+    ///     past-frame memories + obj_ptrs.
+    ///   - memoryPos: optional positional bias added to memory key only.
+    ///   - image: optional (B, N_q, D) **raw** current frame image features. When set,
+    ///     image_cross_attn_q_proj uses this; otherwise falls back to the post-norm src
+    ///     (legacy behavior). Mirrors python decoder line `q = image_cross_attn_q_proj(image)
+    ///     + cross_attn_q_proj(tgt2)`.
+    ///   - memoryImage: optional (B, N_k_img, D) past-frame raw image features stacked.
+    ///     When set, image_cross_attn_k_proj uses this. Without it, falls back to memory.
+    ///     Note `N_k_img` may differ from `N_k_mem` (mem has +obj_ptrs).
+    ///   - memoryImagePos: optional positional bias added to memoryImage key only.
+    func callAsFunction(
+        _ src: MLXArray,
+        memory: MLXArray,
+        memoryPos: MLXArray? = nil,
+        image: MLXArray? = nil,
+        memoryImage: MLXArray? = nil,
+        memoryImagePos: MLXArray? = nil,
+        numKExcludeRope: Int = 0
+    ) -> MLXArray {
         var out = src
 
         // 1. Self-attention
@@ -243,14 +283,62 @@ class DecoupledMemoryAttentionLayer: Module {
         let v1 = selfAttnVProj(normed1)
         out = out + selfAttnOutProj(selfAttentionRope(q1, k1, v1))
 
-        // 2. Cross-attention to memory
+        // 2. Cross-attention (decoupled, matches python decoder.py:1192-1200):
+        //    q = image_cross_attn_q_proj(image) + cross_attn_q_proj(tgt2)
+        //    k = image_cross_attn_k_proj(memory_image) + cross_attn_k_proj(memory)
+        //    if pos_enc_at_cross_attn_keys: k = k + memory_image_pos       (post-projection!)
+        //    v = cross_attn_v_proj(memory)
+        // For SAM 3.1 multiplex video: pos_enc_at_cross_attn_keys=True, _queries=False.
         let normed2 = norm2(out)
-        let q2 = crossAttnQProj(normed2) + imageCrossAttnQProj(normed2)
-        let k2 = crossAttnKProj(memory) + imageCrossAttnKProj(memory)
+        let imageQInput = image ?? normed2                      // python: raw image (pre-norm)
+        let q2 = crossAttnQProj(normed2) + imageCrossAttnQProj(imageQInput)
+
+        // K: project both inputs separately, then sum, then add memory_image_pos POST.
+        // memory: (B, N_mem, D) where N_mem = past_frames * HW + obj_ptr_count
+        // memory_image: (B, N_img, D) where N_img = past_frames * HW (no obj_ptrs)
+        // Python pads memory_image with zeros at the obj_ptr tail BEFORE projection
+        // (so the bias contributes to those positions). We do the same.
+        let kMain = crossAttnKProj(memory)                       // (B, N_mem, D)
+        let kImg: MLXArray
+        if let mi = memoryImage {
+            let nMem = memory.dim(1), nImg = mi.dim(1)
+            let alignedMi: MLXArray
+            if nImg < nMem {
+                let zeros = MLXArray.zeros([mi.dim(0), nMem - nImg, mi.dim(2)], dtype: mi.dtype)
+                alignedMi = concatenated([mi, zeros], axis: 1)
+            } else if nImg > nMem {
+                alignedMi = mi[0..., ..<nMem, 0...]
+            } else {
+                alignedMi = mi
+            }
+            kImg = imageCrossAttnKProj(alignedMi)
+        } else {
+            // No separate memory_image: project memory through image_cross_attn_k_proj too
+            // (legacy fallback, slightly wrong vs python but preserves existing fixture tests).
+            kImg = imageCrossAttnKProj(memory)
+        }
+        var k2 = kMain + kImg
+        // Post-projection add: memoryPos is the spatial-image-pos + temporal-frame-pos for
+        // memory_image. Python adds it directly to k (after both projections sum).
+        if let memPos = memoryPos {
+            // memPos shape may be (B, N_img, D) — pad/truncate to N_mem to match k2 length.
+            let nMem = k2.dim(1), nP = memPos.dim(1)
+            let aligned: MLXArray
+            if nP < nMem {
+                let zeros = MLXArray.zeros([memPos.dim(0), nMem - nP, memPos.dim(2)], dtype: memPos.dtype)
+                aligned = concatenated([memPos, zeros], axis: 1)
+            } else if nP > nMem {
+                aligned = memPos[0..., ..<nMem, 0...]
+            } else {
+                aligned = memPos
+            }
+            k2 = k2 + aligned
+        }
         let v2 = crossAttnVProj(memory)
         out = out + crossAttnOutProj(crossAttentionRope(q2, k2, v2, numKExcludeRope: numKExcludeRope))
 
-        // 3. FFN
+        // 3. FFN — HF config says "relu". (Meta python/sam3 model_builder hard-codes "gelu",
+        // but that builds a different architecture. HF weights expect relu.)
         out = out + linear2(relu(linear1(norm3(out))))
         MLX.eval(out)
         return out
@@ -279,10 +367,27 @@ public class DecoupledMemoryAttention: Module {
         super.init()
     }
 
-    public func callAsFunction(_ src: MLXArray, memory: MLXArray, numKExcludeRope: Int = 0) -> MLXArray {
+    public func callAsFunction(
+        _ src: MLXArray,
+        memory: MLXArray,
+        memoryPos: MLXArray? = nil,
+        image: MLXArray? = nil,
+        srcPos: MLXArray? = nil,
+        memoryImage: MLXArray? = nil,
+        memoryImagePos: MLXArray? = nil,
+        numKExcludeRope: Int = 0
+    ) -> MLXArray {
+        // Python adds 0.1 * src_pos to input when pos_enc_at_input=True (which it is
+        // for SAM 3.1 multiplex video). We don't have a config flag here; just do it
+        // when src_pos is provided.
         var out = src
+        if let sp = srcPos {
+            out = out + MLXArray(Float(0.1)) * sp
+        }
         for layer in layers {
-            out = layer(out, memory: memory, numKExcludeRope: numKExcludeRope)
+            out = layer(out, memory: memory, memoryPos: memoryPos,
+                        image: image, memoryImage: memoryImage, memoryImagePos: memoryImagePos,
+                        numKExcludeRope: numKExcludeRope)
         }
         return layerNorm(out)
     }

@@ -16,6 +16,7 @@ let package = Package(
         .executable(name: "VideoTrack", targets: ["VideoTrack"]),
         .executable(name: "Sam31VideoTrack", targets: ["Sam31VideoTrack"]),
         .executable(name: "Sam31VideoTrackFull", targets: ["Sam31VideoTrackFull"]),
+        .executable(name: "sam3-bench", targets: ["sam3-bench"]),
     ],
     dependencies: [
         .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.3")),
@@ -74,6 +75,14 @@ let package = Package(
                 .product(name: "MLX", package: "mlx-swift"),
             ],
             path: "Examples/Sam31VideoTrackFull"
+        ),
+        .executableTarget(
+            name: "sam3-bench",
+            dependencies: [
+                "MLXSAM3",
+                .product(name: "MLX", package: "mlx-swift"),
+            ],
+            path: "Tools/sam3-bench"
         ),
         .testTarget(
             name: "MLXSAM3Tests",
