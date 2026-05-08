@@ -1,12 +1,20 @@
 // Sam31ImageInfer — CLI: SAM 3.1 image + text prompt → mask/box overlay PNG.
 //
-// Build:   swift build --product Sam31ImageInfer
-// Run:     swift run Sam31ImageInfer \
-//              --image  path/to/input.jpg \
-//              --prompt "a cat" \
-//              --tokenizer weights/sam3.1 \
-//              --weights  weights/sam3.1 \
-//              --output   path/to/overlay.png
+// IMPORTANT: build via xcodebuild, NOT `swift build` / `swift run`. MLX needs
+// a Metal-capable toolchain at runtime; SwiftPM's path errors at startup with
+// `Failed to load the default metallib`.
+//
+// Build:
+//     xcodebuild -scheme Sam31ImageInfer -destination 'platform=macOS' \
+//         -configuration release -derivedDataPath .xcdd build
+//
+// Run:
+//     .xcdd/Build/Products/Release/Sam31ImageInfer \
+//         --image  path/to/input.jpg \
+//         --prompt "a cat" \
+//         --tokenizer weights/sam3.1-bf16 \
+//         --weights  weights/sam3.1-bf16 \
+//         --output   path/to/overlay.png
 
 import CoreGraphics
 import Foundation

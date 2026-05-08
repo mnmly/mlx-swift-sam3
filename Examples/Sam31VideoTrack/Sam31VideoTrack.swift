@@ -1,11 +1,18 @@
 // Sam31VideoTrack — CLI: per-frame SAM 3.1 inference on a video; writes overlay mp4.
 //
-// Build:   swift build --product Sam31VideoTrack
-// Run:     swift run Sam31VideoTrack \
-//              --input  path/to/video.mp4 \
-//              --prompt "a cat" --tokenizer <snapshot-dir> \
-//              --weights <snapshot-dir> \
-//              --output path/to/overlay.mp4
+// IMPORTANT: build via xcodebuild, NOT `swift build` / `swift run`. MLX needs
+// a Metal-capable toolchain at runtime.
+//
+// Build:
+//     xcodebuild -scheme Sam31VideoTrack -destination 'platform=macOS' \
+//         -configuration release -derivedDataPath .xcdd build
+//
+// Run:
+//     .xcdd/Build/Products/Release/Sam31VideoTrack \
+//         --input  path/to/video.mp4 \
+//         --prompt "a cat" --tokenizer <snapshot-dir> \
+//         --weights <snapshot-dir> \
+//         --output path/to/overlay.mp4
 //
 // Slim demo: runs `detect()` on each frame independently (no memory-bank
 // tracking — that is deferred video orchestration work).

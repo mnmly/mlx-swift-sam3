@@ -77,8 +77,19 @@ let result = try predictor.predict(
 
 ## CLI
 
+> ⚠️ Use `xcodebuild`, not `swift run`. MLX needs a Metal-capable toolchain at runtime; `swift run` / `swift build` produce a binary that errors with `Failed to load the default metallib` at startup.
+
+Build any executable target with:
+
 ```bash
-swift run Sam31ImageInfer \
+xcodebuild -scheme Sam31ImageInfer -destination 'platform=macOS' \
+    -configuration release -derivedDataPath .xcdd build
+```
+
+Then run from `.xcdd/Build/Products/Release/`:
+
+```bash
+.xcdd/Build/Products/Release/Sam31ImageInfer \
   --image photo.jpg \
   --prompt "a cat" \
   --tokenizer weights/sam3.1-bf16 \
@@ -92,7 +103,10 @@ swift run Sam31ImageInfer \
 SAM 3.1 video tracking demos are also available:
 
 ```bash
-swift run Sam31VideoTrackFull \
+xcodebuild -scheme Sam31VideoTrackFull -destination 'platform=macOS' \
+    -configuration release -derivedDataPath .xcdd build
+
+.xcdd/Build/Products/Release/Sam31VideoTrackFull \
   --input input.mp4 \
   --prompt "a car" \
   --tokenizer weights/sam3.1-bf16 \

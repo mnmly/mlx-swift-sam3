@@ -1,12 +1,19 @@
 // Sam31VideoTrackFull — CLI: SAM 3.1 video tracking with persistent IDs.
 //
-// Build:   swift build --product Sam31VideoTrackFull
-// Run:     swift run Sam31VideoTrackFull \
-//              --input  path/to/video.mp4 \
-//              --prompt "a cat" --tokenizer <snapshot-dir> \
-//              --weights <snapshot-dir> \
-//              --output path/to/overlay.mp4 \
-//              [--redetect-every 15] [--threshold 0.5]
+// IMPORTANT: build via xcodebuild, NOT `swift build` / `swift run`. MLX needs
+// a Metal-capable toolchain at runtime.
+//
+// Build:
+//     xcodebuild -scheme Sam31VideoTrackFull -destination 'platform=macOS' \
+//         -configuration release -derivedDataPath .xcdd build
+//
+// Run:
+//     .xcdd/Build/Products/Release/Sam31VideoTrackFull \
+//         --input  path/to/video.mp4 \
+//         --prompt "a cat" --tokenizer <snapshot-dir> \
+//         --weights <snapshot-dir> \
+//         --output path/to/overlay.mp4 \
+//         [--redetect-every 15] [--threshold 0.5]
 //
 // Uses Sam31VideoTracker (slim v2): re-detect every N frames + trackStep-driven
 // propagation in between. Per-track stable colors + ID labels. See
