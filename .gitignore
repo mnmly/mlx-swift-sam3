@@ -18,3 +18,4 @@ weights/
 .venv/
 __pycache__/
 .vscode
+.xcdd
