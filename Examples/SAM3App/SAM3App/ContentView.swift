@@ -30,6 +30,7 @@ struct ContentView: View {
     var body: some View {
         VStack(spacing: 0) {
             modelBar
+            if !model.isLoaded { modelHint }
             Divider()
             TabView(selection: $selectedTab) {
                 ImageDemoView(model: model)
@@ -84,10 +85,28 @@ struct ContentView: View {
         .background(Color(nsColor: .controlBackgroundColor))
     }
 
+    private var modelHint: some View {
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: "info.circle").foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 2) {
+                Text("Grab weights from Hugging Face, then point the picker at the cache repo root.")
+                    .font(.caption)
+                Text("e.g. `huggingface-cli download facebook/sam3` then select `~/.cache/huggingface/hub/models--facebook--sam3`.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 6)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+
     private func selectModelDirectory() {
         let panel = NSOpenPanel()
         panel.title = "Select SAM 3.1 Model Directory"
-        panel.message = "Choose a directory containing model.safetensors and tokenizer.json"
+        panel.message = "Choose a directory with model.safetensors + tokenizer.json — or a Hugging Face cache repo root (models--<org>--<name>) and the app will resolve the snapshot."
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = true
         panel.canChooseFiles = false

@@ -30,14 +30,19 @@ final class SAM3ViewModel: ObservableObject {
                     directory.stopAccessingSecurityScopedResource()
                 }
             }
+            // If the user picked the HF cache repo root (`models--org--name/`),
+            // resolve to the actual `snapshots/<rev>/` so MLX can mmap the
+            // safetensors blobs through symlinks that stay inside the grant.
+            let resolved = Self.resolveHuggingFaceSnapshot(directory) ?? directory
+            modelPath = resolved.path
             let loaded = try await Task.detached(priority: .userInitiated) {
                 () -> (SAM3Predictor, Sam31VideoPipeline) in
                 let tokenizer = try await SAM3Tokenizer.fromSnapshotOrOpenAIClip(
-                    directory,
+                    resolved,
                     maxLength: 32
                 )
                 let model = Sam31Model(Sam31ModelConfig())
-                try ModelLoader.load(sam31: model, from: directory, dtype: .bfloat16)
+                try ModelLoader.load(sam31: model, from: resolved, dtype: .bfloat16)
                 let imagePredictor = SAM3Predictor(
                     model: model,
                     tokenizer: tokenizer,
@@ -132,9 +137,51 @@ final class SAM3ViewModel: ObservableObject {
         let message = error.localizedDescription
         if message.contains("load_safetensors") {
             return """
-            MLX could not read model.safetensors in \(directory.lastPathComponent). If this is a Hugging Face cache snapshot, select the snapshot via the app's file picker and keep the app sandbox read permission. If it still fails, copy the snapshot with resolved symlinks to a normal folder.
+            MLX could not read model.safetensors in \(directory.lastPathComponent). For a Hugging Face cache, pick the repo root (e.g. ~/.cache/huggingface/hub/models--<org>--<name>) so both snapshots/ and blobs/ are inside the sandbox grant — the app will resolve to the snapshot for you.
             """
         }
         return message
+    }
+
+    /// If `directory` is an HF cache repo root (`models--<org>--<name>/`),
+    /// return the `snapshots/<rev>/` URL it points at. Returns nil otherwise.
+    ///
+    /// The user must pick the repo root rather than the snapshot itself so the
+    /// security-scoped grant covers `blobs/` — the snapshot folder contains
+    /// only relative symlinks (`../../blobs/<sha>`) which fail to mmap if the
+    /// grant is scoped to the snapshot directory alone.
+    private static func resolveHuggingFaceSnapshot(_ directory: URL) -> URL? {
+        let fm = FileManager.default
+        let snapshots = directory.appendingPathComponent("snapshots", isDirectory: true)
+        let blobs = directory.appendingPathComponent("blobs", isDirectory: true)
+        var isDir: ObjCBool = false
+        guard fm.fileExists(atPath: snapshots.path, isDirectory: &isDir), isDir.boolValue,
+              fm.fileExists(atPath: blobs.path, isDirectory: &isDir), isDir.boolValue
+        else { return nil }
+
+        // Prefer the revision pinned by refs/main, if present.
+        let refsMain = directory.appendingPathComponent("refs/main")
+        if let rev = try? String(contentsOf: refsMain, encoding: .utf8) {
+            let trimmed = rev.trimmingCharacters(in: .whitespacesAndNewlines)
+            let candidate = snapshots.appendingPathComponent(trimmed, isDirectory: true)
+            if fm.fileExists(atPath: candidate.path) { return candidate }
+        }
+
+        // Fall back to the most recently modified snapshot directory.
+        let entries = (try? fm.contentsOfDirectory(
+            at: snapshots,
+            includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        )) ?? []
+        let dirs = entries.filter {
+            (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
+        }
+        return dirs.max { a, b in
+            let da = (try? a.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate) ?? .distantPast
+            let db = (try? b.resourceValues(forKeys: [.contentModificationDateKey])
+                .contentModificationDate) ?? .distantPast
+            return da < db
+        }
     }
 }
