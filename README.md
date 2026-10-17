@@ -174,3 +174,9 @@ Open `Examples/SAM3App/SAM3App.xcodeproj` in Xcode, build the `SAM3App` scheme, 
 ## Benchmarks
 
 See [Benchmarks/README.md](Benchmarks/README.md) for protocol-matched perf measurements vs the python/sam3 reference.
+
+## License
+
+Distributed under Meta's [SAM License](LICENSE), as a derivative of
+[SAM 3](https://github.com/facebookresearch/sam3). Module layout follows
+[mlx-vlm](https://github.com/Blaizzy/mlx-vlm) (MIT).
