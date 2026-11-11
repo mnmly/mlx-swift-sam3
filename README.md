@@ -78,6 +78,8 @@ let result = try predictor.predict(
 ## CLI
 
 > ⚠️ Use `xcodebuild`, not `swift run`. MLX needs a Metal-capable toolchain at runtime; `swift run` / `swift build` produce a binary that errors with `Failed to load the default metallib` at startup.
+>
+> Requires Swift tools ≥ 6.3 (mlx-swift 0.32.x). If a swiftly-installed older `swift` shadows Xcode's, use `xcrun swift package resolve`.
 
 Build any executable target with:
 

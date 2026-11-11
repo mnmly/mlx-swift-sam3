@@ -17,8 +17,8 @@ let package = Package(
         .executable(name: "sam3-bench", targets: ["sam3-bench"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.31.3")),
-        .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.0"),
+        .package(url: "https://github.com/ml-explore/mlx-swift", .upToNextMinor(from: "0.32.3")),
+        .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.5"),
     ],
     targets: [
         .target(
